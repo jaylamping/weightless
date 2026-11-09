@@ -11,7 +11,7 @@ Background:
 
 | # | Track | Status |
 |---|---|---|
-| 1 | Rust GPU inference engines | [first pass](01-inference-engines.md) |
+| 1 | Rust GPU inference engines | [report](01-inference-engines.md), [Mac benchmark](../../bench/track1/RESULTS.md) |
 | 2 | Model formats, size limits (no hard 10B cap), edit deltas vs snapshots | not started |
 | 3 | Weight-editing methods (ROME/MEMIT, rank-1, steering, model diffing, paper code) | not started |
 | 4 | Interpretability for the "see everything" view (logit lens, SAEs, attribution) | not started |

@@ -75,7 +75,15 @@ Consequences:
 | Metal / CUDA / AMD | ✓ / ✓ / – | ✓ / ✓ / – | ✓ / – / – | ✓ / ✓ / ✓ | ✓ / ✓ / ✓ |
 | Desktop packaging | easy | easy | Mac only | easy | C++ build |
 
-## Recommendation (provisional)
+## Benchmark results (9 Nov 2026)
+
+See [bench/track1/RESULTS.md](../../bench/track1/RESULTS.md). In short: mistral.rs matches mlx-lm on speed (~32 vs ~31 tok/s) and reproduces Joey's kept edits exactly. candle's Qwen3.5 PR runs at 0.35 tok/s on Metal because the GDN scan is unfused. Kept edits flip between decode paths in the same framework, so the parity harness must pin the decode path.
+
+## Recommendation (updated after benchmark)
+
+The primary backend should build on **mistral.rs's model code and kernels** (candle-based, so the `Engine` contract is unchanged), not candle's in-tree Qwen3.5. mlx is the speed and fidelity baseline. Plain candle stays the place where we write our own kernels, the fused GDN scan first.
+
+### Original provisional recommendation
 
 1. **Build the engine on candle**, behind our own `Engine` trait (load, forward with taps, logits, apply/revert, batch trials). Use mistral.rs and the open candle PRs as the source for Qwen3.5 and GDN model code instead of writing it from scratch.
 2. **Keep mlx-rs as a second backend option for Macs**, chosen only if candle on Metal is clearly slower than mlx-lm on Joey's machine.
