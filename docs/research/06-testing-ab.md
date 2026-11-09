@@ -134,4 +134,4 @@ These fields serve the gate, A/B reports and navigator-model training:
 
 - Verify `mlx_lm.evaluate` generation support, and the lighteval, HELM and LiveBench licenses.
 - Calibrate ε and the KL and top-1 thresholds against Joey's real keeps and rejects.
-- Build the A/A noise floor for each backend: mlx batch vs stream, and mistral.rs.
+- Build the A/A noise floor for each backend: mlx batch vs stream, and mistral.rs, and in gate mode (track 11) once a backend has it.

@@ -59,3 +59,27 @@ Ranked by how much each could change a decision.
 3. **Competitors:** not needed as market research (personal, non-commercial). Prior art is still worth mining for techniques in track 3.
 4. **Platforms:** proper testing on both **Mac and Windows** (Joey-PC) is required. A Windows/CUDA benchmark is added to track 1.
 5. **A/A noise floor and thinking-on runs:** added to the track 6 scoreboard.
+
+## 5. Track 11 follow-ups (9 Nov 2026)
+
+Joey asked for all of [track 11](11-ram-offload-inference.md)'s recommendations to go into the plan. They're listed in the [research index](README.md#plan-changes-adopted-from-track-11-joey-9-nov-2026). Still open:
+
+- Does mistral.rs's topology file allow per-tensor CPU placement, such as experts only? Read the source.
+- Does the Qwen3.5/3.8 MTP head share `lm_head`? It decides whether edits carry into speculative drafts.
+- Windows/CUDA run on Joey-PC under a memory budget: Qwen3.5-9B as Q4 body + bf16 `lm_head`, with SOLIDWORKS open. **Only after Joey clears it.**
+- Check Joey-PC's NVIDIA Sysmem Fallback policy before the next GPU run.
+
+### Second joe-review (9 Nov 2026, PR 1 and PR 2)
+
+Six reviewers plus a judge. Fixed in the PRs: stale control numbers in RESULTS, `register_delta` separate from in-place `apply`, `plan` feeding `load`, gate mode as backend-wide state, the offload flags on `Capabilities`, Joey-PC VRAM sizing against free memory, consistent "unconfirmed" wording for llama.cpp `lm_head` LoRAs, and several report wording errors.
+
+**Confirmed on the Mac (headers only):** every edited snapshot stores `lm_head.weight` as **F32** (4.07 GB); the original stores BF16. So mistral.rs `--dtype bf16` vs mlx on edited snapshots mixed a precision change with backend differences (now noted in RESULTS). The edited snapshots' `model.safetensors.index.json` `total_size` is a stale copy of the original's (19.31 GB vs 21.34 GB actual).
+
+Still open:
+- Re-run the edited-snapshot mlx vs mistral.rs comparison at matched `lm_head` precision.
+- Serve mode: engines without logprobs get generation-only checks and edits marked "not margin-checked" (Joey, 9 Nov). Whether Strata returns logprobs is unchecked.
+- Measure the Joey-PC budget (Q4 or NVFP4 body + bf16 `lm_head`) before relying on "fits".
+- A/A noise floor in gate mode (06-testing-ab.md still lists only mlx batch/stream and mistral.rs).
+- Where Qwen3.5's Gated DeltaNet recurrent state lives, and at what precision, under gate mode.
+- How a program reads the NVIDIA Sysmem Fallback setting (no API cited yet).
+

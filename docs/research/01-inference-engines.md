@@ -145,6 +145,13 @@ pub struct Capabilities {
     pub batched_trials: bool,   // many candidate edits scored in one pass
     pub dtypes: Vec<DType>,     // bf16, f16, f32, q4_k, ...
     pub devices: Vec<Device>,   // Metal, CUDA, ROCm, Vulkan, CPU
+    // Added from track 11 (RAM offload):
+    pub offload_layers: bool,   // whole layers can run on the CPU
+    pub offload_experts: bool,  // MoE routed experts can live in RAM and run on the CPU
+    pub gpu_expert_cache: bool, // adaptive GPU cache for experts that live in RAM
+    pub elastic_vram: bool,     // set_vram_reserve works without unloading
+    pub deterministic_gate_mode: bool, // begin_gate can freeze placement, kernels and drafting
+    pub top_logprobs: bool,     // can return top-k logprobs per step (needed for a full margin re-gate; without it, generation-only checks)
 }
 
 /// One request. Deltas are activated per request, so concurrent workers can each carry different edits
@@ -159,7 +166,8 @@ pub struct TraceRequest {
 
 pub trait Backend {
     fn capabilities(&self) -> &Capabilities;
-    fn load(&mut self, model: ModelRef /* hf id + revision or local path */) -> Result<ModelInfo>; // ModelInfo includes tied_embeddings
+    fn plan(&self, model: &ModelRef, budget: MemoryBudget, edited: &[TensorName]) -> Result<PlacementPlan>; // run before load
+    fn load(&mut self, model: ModelRef /* hf id + revision or local path */, plan: PlacementPlan) -> Result<ModelInfo>; // ModelInfo includes tied_embeddings
     fn tensor_index(&self) -> Vec<TensorInfo>;              // names, shapes, dtypes
     fn read_tensor(&self, name: &str, slice: Slice) -> Result<HostTensor>;
     fn trace(&self, req: TraceRequest) -> Result<Trace>;     // generation + tokens, top-k logits, gaps, taps (covers `run`)
@@ -171,7 +179,22 @@ pub trait Backend {
     // also be passed in TraceRequest.deltas (the backend rejects it rather than adding it twice).
     fn score_trials(&self, base: TraceRequest, trials: &[Delta]) -> Result<Vec<TrialScore>>;
     fn export(&self, deltas: &[DeltaHandle], fmt: ExportFormat) -> Result<PathBuf>;
+    // Added from track 11 (RAM offload):
+    fn set_vram_reserve(&mut self, mib: u64) -> Result<()>;  // elastic VRAM: give memory back without unloading
+    fn begin_gate(&mut self, spec: GateSpec) -> Result<GateToken>; // backend-wide: freezes placement and cache swaps
+    fn end_gate(&mut self, t: GateToken) -> Result<GateReport>;    // GateReport.invalidated if anything moved anyway
 }
+// MemoryBudget = free VRAM and RAM minus reserves for other apps and the OS. It is read before `plan` and
+// re-checked per request; a drop below the plan's needs triggers a warning and a re-plan between requests.
+// PlacementPlan gives each tensor a device, a dtype and two separate flags: `gpu_resident` (never moved off
+// the GPU) and `edited`. `plan` pins every tensor in `edited` to the GPU at full precision. `apply` or
+// `register_delta` on a tensor the plan put elsewhere returns NeedsReplan, and the caller re-plans and
+// reloads the affected tensors. Page-locked host memory is a separate concept (`host_pinned`).
+// Gate mode is backend state, not a per-request flag: while a GateToken is live, adaptive cache swaps stop,
+// set_vram_reserve and re-plans are deferred, and trace requests run with GateSpec's fixed kernel path, no
+// drafting and the deployment KV dtype. Any request issued outside the gate (fast-mode chat) waits or runs
+// without touching shared placement. If a change is forced anyway (VRAM taken by another app), end_gate
+// reports the gate run as invalidated and it is rerun.
 ```
 
 Everything above this trait (gates, keep rule, ledger, lineage, the agent API) is backend-agnostic. A **parity harness** runs the same probes and the same delta on every backend, and records logit and top-1 agreement in the ledger, so rows from different backends stay comparable.
@@ -188,6 +211,11 @@ Everything above this trait (gates, keep rule, ledger, lineage, the agent API) i
 | per_request_deltas | we build | ✓ | per context | we build | we build |
 | batched_trials | we build | partial | – | we build | we build |
 | Qwen3.5 | open PRs | ✓ | ✓ | port from mlx-lm | – |
+| offload_layers (track 11) | we build | ✓ whole layers to CPU | ✓ `-ngl` | unified memory | – |
+| offload_experts + gpu_expert_cache | we build | not found | ✓ `-ot exps=CPU`, `--moe-cache-mib` | unified memory | – |
+| elastic_vram | we build | – | – | n/a | – |
+| deterministic_gate_mode | we build | check | check | check | check |
+| top_logprobs | ✓ | ✓ (OpenAI `logprobs`) | ✓ (`n_probs`) | ✓ | we build |
 
 ## Wave order (proposed)
 
@@ -212,3 +240,4 @@ candle and MLX are the **baseline**. *(This decision predates the benchmark. Sin
 - edit fidelity (does the reference delta reproduce the recorded completion lengths?)
 - trials/s for batched candidate edits
 - peak memory
+- the same metrics on Joey-PC under a memory budget (quantized body + full-precision edited tensors, or MoE expert offload), in gate mode and fast mode (track 11)
