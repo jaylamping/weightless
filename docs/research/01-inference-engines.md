@@ -100,3 +100,82 @@ This has to run on Joey's MacBook (128 GB), since that's where the baseline live
 - Has candle PR #3396 been merged since July? Was the repetition bug fixed?
 - Does mistral.rs expose a supported hook for hidden states or custom logits processors that we could use instead of forking?
 - MoE edits: are router and expert tensors in scope? That's for track 3.
+
+---
+
+# Part 2: Universal engine (decision 9 Nov 2026)
+
+Joey decided the goal is a **universal engine**: every viable runtime inside one Weightless API, with backends shipped in waves. This part drafts the contract and checks what each backend can support for each hook.
+
+## Key finding: edits as low-rank deltas
+
+A rank-1 edit `W += u vᵀ` is exactly a **rank-1 LoRA adapter** (A = vᵀ, B = u, scale 1). Most engines already support LoRA, so representing every Weightless edit as a low-rank delta, not a mutated tensor, gives us:
+
+- **Portability.** A kept edit exports as a standard LoRA (safetensors for PEFT/MLX/mistral.rs, GGUF for llama.cpp). Users can run their edited model anywhere, not just in Weightless.
+- **Concurrent workers for free on some backends.** mistral.rs keeps several adapters loaded on one base model and serves requests with different adapters side by side, with runtime load, replace and unload ([docs](https://ericlbuehler.github.io/mistral.rs/guides/customize/lora-adapters/)). That's the "1000 workers sharing one model" pattern, as long as limits allow (default 16 adapters, rank 256, configurable).
+- **Cheap lineage.** A snapshot becomes base hash + an ordered list of small deltas, instead of a 19 GB copy per kept edit. Merging into a full checkpoint becomes an explicit export step (track 2).
+- **Quantized bases.** The delta stays in full precision while the base can be quantized. That's the "90B on a laptop" requirement.
+
+Caveats to verify:
+
+- llama.cpp sets adapters per **context**, not per sequence, through `llama_set_adapters_lora(ctx, adapters, n, scales)`. Adapters must be loaded before the context is created, but they can be switched and rescaled without reloading ([guide](https://instagit.com/ggml-org/llama.cpp/how-to-use-lora-adapters-with-gguf-models)). For batched trials it needs one context per worker group, or our own patch.
+- Whether each engine lets LoRA target `lm_head` (the output projection) is unconfirmed. Many LoRA loaders only map attention and MLP projections.
+- mistral.rs says some GGUF architectures, such as Llama and Mistral 3, can't take adapters.
+- Exploration still needs a fast path. For `lm_head` rank-1 trials, the effect is just `logits += (δ/‖h‖²)(h·h_t)` per candidate, computed on top of a shared forward pass. No adapter machinery needed.
+
+## Draft adapter contract
+
+```rust
+/// What a backend can do. The UI and agent tools read this and hide what isn't supported.
+pub struct Capabilities {
+    pub run: bool,              // generate text
+    pub full_logits: bool,      // full vocab logits per step
+    pub hidden_taps: TapLevel,  // None | FinalOnly | EveryLayer
+    pub weight_read: bool,      // read any named tensor
+    pub delta_edits: DeltaSupport, // None | LmHeadOnly | AnyLinear
+    pub per_request_deltas: bool,  // different edits per concurrent request
+    pub batched_trials: bool,   // many candidate edits scored in one pass
+    pub dtypes: Vec<DType>,     // bf16, f16, f32, q4_k, ...
+    pub devices: Vec<Device>,   // Metal, CUDA, ROCm, Vulkan, CPU
+}
+
+pub trait Backend {
+    fn capabilities(&self) -> &Capabilities;
+    fn load(&mut self, model: ModelRef /* hf id + revision or local path */) -> Result<ModelInfo>;
+    fn tensor_index(&self) -> Vec<TensorInfo>;              // names, shapes, dtypes
+    fn read_tensor(&self, name: &str, slice: Slice) -> Result<HostTensor>;
+    fn trace(&self, req: TraceRequest) -> Result<Trace>;     // tokens, top-k logits, gaps, taps
+    fn apply(&mut self, delta: Delta) -> Result<DeltaHandle>; // low-rank delta on a named tensor
+    fn revert(&mut self, h: DeltaHandle) -> Result<()>;
+    fn score_trials(&self, base: TraceRequest, trials: &[Delta]) -> Result<Vec<TrialScore>>;
+    fn export(&self, deltas: &[DeltaHandle], fmt: ExportFormat) -> Result<PathBuf>;
+}
+```
+
+Everything above this trait (gates, keep rule, ledger, lineage, the agent API) is backend-agnostic. A **parity harness** runs the same probes and the same delta on every backend, and records logit and top-1 agreement in the ledger, so rows from different backends stay comparable.
+
+## Capability matrix (expected, unverified)
+
+| Hook | candle (own code) | mistral.rs | llama.cpp | MLX (mlx-rs) | burn |
+|---|---|---|---|---|---|
+| run | ✓ | ✓ | ✓ | ✓ | ✓ |
+| full_logits | ✓ | likely | ✓ | ✓ | ✓ |
+| hidden_taps | EveryLayer | patch needed | EveryLayer via eval callback | EveryLayer | EveryLayer |
+| weight_read | ✓ | patch | ✓ (ggml tensors, may be quantized) | ✓ | ✓ |
+| delta_edits | AnyLinear | AnyLinear via LoRA (lm_head?) | LoRA (lm_head?) | AnyLinear | AnyLinear |
+| per_request_deltas | we build | ✓ | per context | we build | we build |
+| batched_trials | we build | partial | – | we build | we build |
+| Qwen3.5 | open PRs | ✓ | ✓ | port from mlx-lm | – |
+
+## Wave order (proposed)
+
+1. **Primary (full feature):** candle-based, reusing mistral.rs model code. Every hook, Metal and CUDA.
+2. **Breadth:** llama.cpp adapter for very large and quantized models and the widest architecture list. Run, trace and LoRA deltas.
+3. **Mac speed:** MLX adapter, if the benchmark shows a real gap on Apple silicon.
+4. **Reach:** burn for AMD, Vulkan and anything without CUDA or Metal.
+
+## Updated next steps
+
+- Benchmark spike on Joey's Mac (Part 1 list), plus: does a rank-1 LoRA on `lm_head` reproduce edit-brief on each engine that accepts it?
+- Read mistral.rs internals for a hidden-state and logits hook. Upstreaming one may be cheaper than forking.
+- Check llama.cpp's eval-callback cost at every layer, and whether `output.weight` accepts LoRA.
