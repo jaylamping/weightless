@@ -4,22 +4,30 @@
 
 ## Summary
 
+- **Division of labour (Joey, 9 Nov 2026):** a reasonably strong model is the **driver**. When Joey says "I wish this model wasn't so chatty", the driver breaks that into a precise **dial request** (what behaviour, which direction, on which prompts, what must not change). The navigator takes the dial request and knows **where and how to turn the dials**: which tensors, rows and positions, and by how much. The engine and gate then try and verify. **No distillation for now:** the navigator does not learn to imitate the driver. It learns from what happened to edits, meaning gate outcomes. Distilling the driver is a possible later phase.
 - **Base model: Qwen3.5-2B** (Apache 2.0, March 2026), with **Qwen3.5-0.8B** as the lite tier and **Qwen3.5-4B** as the step-up if 2B misses the eval bar. The deciding reason is that Qwen3.5 is the architecture our primary engine already runs (track 1), so the navigator needs no extra runtime, and it shares a tokenizer and family with the most likely target models.
-- **The navigator is three parts, not one model.** A tiny **scorer** (not an LLM) ranks thousands of candidate edits per second. The **navigator LM** turns the agent's goal into engine calls, proposes candidates and explains gate results. A later **activation reader** lets it read the target's hidden states directly.
+- **The navigator is three parts, not one model.** A tiny **scorer** (not an LLM) ranks thousands of candidate edits per second. The **navigator LM** turns the driver's dial request into concrete candidate edits and explains gate results. A later **activation reader** lets it read the target's hidden states directly.
 - **The ledger is the training set, and the gate is the label.** Every candidate gets a verdict from the track 6 gate, so labels are free and objective. That also gives us a verifiable reward for RL later.
-- **Bootstrap without users:** run automated edit campaigns on small target models with heuristic proposers to fill the ledger with millions of labeled candidates, import Joey's weight-space campaign, and record a strong agent driving the engine directly for planning data.
+- **Bootstrap without users:** run automated edit campaigns on small target models with heuristic proposers to fill the ledger with millions of labeled candidates, import Joey's weight-space campaign, and add real sessions where the frontier driver works through the navigator.
 - **Train on the Mac first** (128 GB, mlx-lm LoRA). Joey-PC only with Joey's go-ahead. Rent a cloud GPU for the RL stage if needed.
 - **Ship the navigator as a LoRA on a stock base**, the same delta-on-base idea the app uses for edits.
 
 ## 1. What the navigator has to do
 
-From the plan: the user's agent (frontier, local or a router) talks to the navigator, and the navigator is the real interface to the loaded target model. Concretely, it sits between the agent and the engine's tool API:
+The flow, using Joey's example:
+
+1. **Joey → driver:** "I wish this model wasn't so chatty."
+2. **Driver → navigator:** a dial request (1a below), e.g. "shorten answers to simple factual and arithmetic questions; keep every required answer and the final number; don't change code or long-form tasks; probes: these 20 prompts; controls: these 8".
+3. **Navigator → engine:** traces the probes, finds where the behaviour is decided (e.g. near-tie positions where an end token loses to another sentence, as in Joey's concision campaign), and proposes ranked candidate edits with sizes.
+4. **Engine + gate:** run the trials and keep or reject. Results go back to the navigator to refine, and a summary goes to the driver.
+
+The driver is the user's agent (frontier, local or a router). It reasons about intent; the navigator is the specialist for the target model's internals. Their jobs:
 
 | Job | Input | Output | Volume |
 |---|---|---|---|
 | **Score** candidate edits before running them | candidate features (gap, cosines, predicted Δlogit on protect sets, tensor, layer, norms) | P(keep), expected margin, likely failure reason | thousands per second, to feed "1000+ workers" |
 | **Propose** candidates | goal, trace (logits, gaps, top-k at each position), recent ledger | a list of edits (tensor, row, target token, δ) with a short rationale | tens per step |
-| **Plan** a campaign | the agent's goal in plain language, the spec (prompts, required answers, controls) | a sequence of engine calls | one per goal, revised as results come in |
+| **Localize** a dial request | the driver's dial request, traces of its probes | where to edit (tensor, layer, rows, positions) and how (direction, size), as a ranked plan | one per request, revised as results come in |
 | **Explain** results | gate output, ledger history | a short diagnosis ("spills onto control 8×7, cosine 0.987") | per verdict |
 | **Summarize** state for the agent | session ledger | a compact status, so the frontier agent spends fewer tokens | per agent turn |
 
@@ -27,6 +35,25 @@ Two lessons from earlier work shape this:
 
 - **Don't make it read raw weights.** The paper's own related work notes that reading raw weights failed at 270M parameters (Takehi et al.), and Nusrat & Nusrat only did it on MLPs with a few thousand parameters. The navigator reads **traces and gate features**, which the engine already computes.
 - **The gate stays the authority.** The navigator ranks and proposes. It never decides what is kept. That keeps a weak or wrong navigator from damaging a model, and it means navigator quality can be measured as "how fast does the gate say yes".
+
+### 1a. The dial request (driver → navigator)
+
+This is the contract between the two, so it's typed, not free text, and every one is stored in the ledger next to the outcomes it led to.
+
+```
+dial_request {
+  behaviour:   "verbosity" | "fact" | "format" | "tone" | "refusal" | "loop" | "custom",
+  direction:   e.g. "shorter", "say X instead of Y", "use JSON",
+  description: free text from the driver, for the record and for the navigator LM,
+  probes[]:    prompts where the change must show, with what counts as success
+               (required answers, max length, target string),
+  controls[]:  prompts that must not change at all,
+  protect[]:   wider sets that must stay close (KL / top-1 thresholds),
+  budget:      max trials, max edits, max size per edit
+}
+```
+
+The driver writes it (with Joey's words as context); the navigator can reply with typed questions back ("probes cover arithmetic only; include code?") before it starts.
 
 ## 2. Architecture: scorer, navigator LM, activation reader
 
@@ -83,12 +110,14 @@ session   { schema_version, session_id, target: { model_id, revision, base_hash,
             goal_text,                         // the user's/agent's goal in plain words
             spec: { prompts[], required_answers[], controls[], protect_sets[] } }
 
+dial_req  { request_id, session_id, user_words, dial_request }   // section 1a; candidates link to it
+
 trace     { trace_id, session_id, prompt_id, position,
             topk: [{ token, logit }], gap, chosen_token,
             h_ref,                              // sidecar hash of the hidden state (fp16), optional
             cos_to_protect: { max, argmax_prompt } }
 
-candidate { candidate_id, session_id, parent_snapshot, trace_id,
+candidate { candidate_id, session_id, request_id, parent_snapshot, trace_id,
             delta,                              // track 2 Delta, without gate fields
             proposer: "heuristic:<name>" | "random" | "agent:<model>" | "navigator:<version>" | "human",
             rationale_text,                     // free text from the proposer, if any
@@ -119,9 +148,9 @@ Rules:
 |---|---|---|---|---|
 | T1 | Keep prediction | scorer (and LM, as text) | candidate + verdict | verdict, margin, reason codes |
 | T2 | Candidate proposal | LM | trace + goal + recent ledger | kept candidates as targets; rejected ones as negatives for preference training |
-| T3 | Diagnosis | LM | verdict + gate metrics | reason codes rendered as text, plus teacher-written explanations |
-| T4 | Planning and tool use | LM | turn logs | the teacher's engine calls |
-| T5 | Summaries for the agent | LM | session ledger | teacher-written summaries, checked against the ledger |
+| T3 | Diagnosis | LM | verdict + gate metrics | reason codes rendered as text from templates |
+| T4 | Localization | LM (+ decision heads) | dial request + probe traces | the edit sites and sizes that the gate kept for that request; rejected sites as negatives |
+| T5 | Summaries for the driver | LM | session ledger | templated from ledger fields |
 | T6 | Activation QA (stage 3) | LM + reader | hidden-state refs | questions answerable from the ledger ("will this edit spill onto prompt X?") |
 
 Format for the LM is the base model's own chat template with tool calls, so the fine-tune teaches content, not syntax. Long ledgers are summarized by the engine into a fixed "state block" so prompts stay under ~16K tokens even though the base handles 262K.
@@ -133,7 +162,7 @@ Real use will produce a few hundred candidates a day at best. That's not enough,
 1. **Synthetic campaigns (the main source).** A headless runner loads small targets (Qwen3.5-0.8B and 2B first, then a Gemma, a Llama-style and an MoE model for diversity), picks goals from templates (concision, change a fact, change a format, persona words, stop a loop, change a refusal), and proposes candidates with heuristics: Joey's near-tie rank-1 rule, random rows, perturbed deltas, deliberately bad whole-row adds. The cached-hidden-state shortcut (track 6) scores an `lm_head` rank-1 candidate with a matrix multiply, so a Mac can label **millions** of candidates overnight. That covers T1, T2 and T3. Edits deeper than `lm_head` need real decoding and are slower, so they get a smaller, targeted share.
 2. **Import Joey's weight-space campaign.** The Qwen3.5-9B concision run (8 Nov) has real keeps and rejects with Joey's keep rule. Convert it into the schema as a seed set and as a held-out sanity check ("does the scorer agree with Joey's verdicts?").
 3. **Public editing datasets** for fact-edit goals: CounterFact and zsRE ([2202.05262](https://arxiv.org/abs/2202.05262)), MQuAKE for multi-hop ([2305.14795](https://arxiv.org/abs/2305.14795)).
-4. **Teacher trajectories for T4/T5.** Let a frontier model (Opus, Fable, Sol, Astra, Joey's allowlist) drive the engine directly (no navigator) on a task suite, and record every turn. **Joey's decision (9 Nov 2026): the teacher is a frontier model.** A local open-weight model on the Mac (Qwen3.6-35B-A3B or Qwen3.8-27B, Apache 2.0) can add cheap bulk trajectories if API cost becomes the limit. Some provider terms restrict training on outputs, so note which provider each trajectory came from in the ledger (`turn` rows already record the agent model).
+4. **Dial requests from synthetic goals and the driver.** Synthetic campaigns generate dial requests from goal templates, so T4 has labels from day one. Real sessions add requests written by the frontier driver from Joey's own words. Either way the label is what the gate kept, not what the driver said. **No distillation for now (Joey, 9 Nov 2026):** we don't train the navigator to copy the driver's reasoning or tool calls. That stays a possible later phase.
 5. **Only then, real sessions.** Every real session appends to the ledger, and the navigator is retrained on a schedule.
 
 ## 7. Fine-tuning method, in stages
@@ -141,7 +170,7 @@ Real use will produce a few hundred candidates a day at best. That's not enough,
 | Stage | Method | Data | Where | Gate to move on |
 |---|---|---|---|---|
 | 0 | Train the **scorer** (LightGBM or a small MLP) | synthetic T1 | Mac or PC CPU, minutes | AUC and calibration beat Joey's hand rules on the held-out sets |
-| 1 | **LoRA SFT** of Qwen3.5-2B (rank 16–64, attention + MLP) | T2–T5 from synthetic + teacher | Mac, mlx-lm LoRA | tool-call validity ≥ 99%, beats the heuristic proposer (section 8) |
+| 1 | **LoRA SFT** of Qwen3.5-2B (rank 16–64, attention + MLP), with decision heads | T2–T5 from synthetic campaigns and driver sessions | Mac, mlx-lm LoRA | tool-call validity ≥ 99%, beats the heuristic proposer (section 8) |
 | 2 | **Preference training** (DPO) on kept vs rejected proposals for the same trace | T2 pairs | Mac | higher keep rate at equal trials |
 | 3 | **Online RL** (GRPO) with the engine as the environment. Reward = gate verdict with margin, minus trials spent; full-tier checks on held-out goals guard against gaming the fast gate | live synthetic campaigns | rented GPU or Mac | trials-to-first-keep down vs stage 2 |
 | 4 | **Activation reader** (section 2c) | T6 | Mac, or rented GPU | answers spill/locality questions better than the scorer alone |
@@ -187,7 +216,7 @@ Baselines: random proposals, Joey's hand rules, the frontier agent alone, and Ge
 ## 11. Decisions for Joey
 
 1. **Base model:** Qwen3.5-2B as default, with 0.8B lite and 4B step-up (recommended), or Gemma 4 E2B as the default instead.
-2. **Teacher for planning data:** frontier models (decided by Joey, 9 Nov 2026), with a local open-weight model as an optional bulk supplement.
+2. **Driver vs navigator (decided by Joey, 9 Nov 2026):** a strong model is the driver and writes dial requests; the navigator localizes and sizes edits and learns only from gate outcomes. No distillation of the driver for now.
 3. **Training hardware:** Mac for stages 0–2 (recommended), a rented GPU for stage 3, and Joey-PC only when cleared.
 
 ## 12. Next steps
