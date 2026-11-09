@@ -179,3 +179,13 @@ Everything above this trait (gates, keep rule, ledger, lineage, the agent API) i
 - Benchmark spike on Joey's Mac (Part 1 list), plus: does a rank-1 LoRA on `lm_head` reproduce edit-brief on each engine that accepts it?
 - Read mistral.rs internals for a hidden-state and logits hook. Upstreaming one may be cheaper than forking.
 - Check llama.cpp's eval-callback cost at every layer, and whether `output.weight` accepts LoRA.
+
+## Baseline vs our own engine (decision 9 Nov 2026)
+
+candle and MLX are the **baseline**. Our own engine is developed alongside them, with its own kernels where it pays off, such as the GDN scan, batched `lm_head` trials and fused taps, and it must match or beat them. The benchmark is therefore a **permanent scoreboard**, not a one-time spike. It uses the same model, probe suite, controls and reference edit (edit-brief), and every engine gets scored on:
+
+- prefill and decode tok/s, and prompts/s for batched short prompts
+- logit parity vs the reference (max abs diff, top-1 agreement over the first 50 steps per probe)
+- edit fidelity (does the reference delta reproduce the recorded completion lengths?)
+- trials/s for batched candidate edits
+- peak memory
