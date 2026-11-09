@@ -8,8 +8,9 @@ from mlx_lm.models.cache import make_prompt_cache
 
 W = Path.home() / "code/weight-space/qwen-harness/weights"
 OUT = Path.home() / "code/weightless-bench/out"
+OUT.mkdir(parents=True, exist_ok=True)
 PROBES = [l.strip() for l in (Path.home()/"code/weight-space/qwen-harness/probes.txt").read_text().splitlines() if l.strip() and not l.startswith("#")]
-CONTROLS = ["What is 8 × 7?", "A square has side length 4. What is its area?"]
+CONTROLS = ["What is 8 times 7?", "A square has side 4. What is its area?"]  # SCORE_EXTRA from qwen_harness/trial_resident.py
 TOPK, TRACE_STEPS, MAX_TOK = 64, 50, 512
 
 def fmt(tok, text):
@@ -69,4 +70,5 @@ def main():
     (OUT / "mlx_report.json").write_text(json.dumps(report, indent=2))
     print("DONE", json.dumps({k: v for k, v in report.items() if k not in ("original", "edit_brief")}), flush=True)
 
-main()
+if __name__ == "__main__":
+    main()

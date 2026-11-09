@@ -1,6 +1,6 @@
 # Track 1: Rust GPU inference engines (first pass)
 
-*Status: desk research, 9 Nov 2026. No code has been benchmarked yet; see "Next step".*
+*Status: desk research plus a Mac benchmark, 9 Nov 2026. Part 1 is the original desk research. Benchmark results and the updated recommendation are in "Benchmark results" below and in [RESULTS.md](../../bench/track1/RESULTS.md).*
 
 ## What the engine has to do
 
@@ -77,22 +77,22 @@ Consequences:
 
 ## Benchmark results (9 Nov 2026)
 
-See [bench/track1/RESULTS.md](../../bench/track1/RESULTS.md). In short: mistral.rs matches mlx-lm on speed (~32 vs ~31 tok/s) and reproduces Joey's kept edits exactly. candle's Qwen3.5 PR runs at 0.35 tok/s on Metal because the GDN scan is unfused. Kept edits flip between decode paths in the same framework, so the parity harness must pin the decode path.
+See [bench/track1/RESULTS.md](../../bench/track1/RESULTS.md). In short: on single-stream generation mistral.rs is in the same range as mlx-lm (~32 vs ~31 tok/s, though the two timers measure different work; see RESULTS), but its batched throughput is ~34% lower (26 vs 39.5 prompts/s, HTTP and concurrency untuned). It reproduces all four snapshots on the probes, but its control outputs differ from mlx (see RESULTS). candle's Qwen3.5 PR runs at 0.35 tok/s on Metal because the GDN scan is unfused. Kept edits flip between decode paths in the same framework, so the parity harness must pin the decode path.
 
 ## Recommendation (updated after benchmark)
 
-The primary backend should build on **mistral.rs's model code and kernels** (candle-based, so the `Engine` contract is unchanged), not candle's in-tree Qwen3.5. mlx is the speed and fidelity baseline. Plain candle stays the place where we write our own kernels, the fused GDN scan first.
+The primary backend should build on **mistral.rs's model code and kernels** (candle-based, so the `Backend` contract below is unchanged), not candle's in-tree Qwen3.5. mlx is the speed and fidelity baseline. Plain candle stays the place where we write our own kernels, the fused GDN scan first.
 
 ### Original provisional recommendation
 
-1. **Build the engine on candle**, behind our own `Engine` trait (load, forward with taps, logits, apply/revert, batch trials). Use mistral.rs and the open candle PRs as the source for Qwen3.5 and GDN model code instead of writing it from scratch.
+1. **Build the engine on candle**, behind our own `Backend` trait (load, forward with taps, logits, apply/revert, batch trials). Use mistral.rs and the open candle PRs as the source for Qwen3.5 and GDN model code instead of writing it from scratch.
 2. **Keep mlx-rs as a second backend option for Macs**, chosen only if candle on Metal is clearly slower than mlx-lm on Joey's machine.
 3. **Use llama.cpp as a parity and reference oracle**, and revisit it in track 2 for very large quantized bases.
 4. **Watch burn** for AMD and Vulkan reach later.
 
-This holds only if the benchmark below shows candle on Metal is usable for Qwen3.5-9B.
+*Superseded by the benchmark: candle's Qwen3.5 PR was not usable on Metal (0.35 tok/s).*
 
-## Next step: benchmark spike on Joey's Mac
+## Benchmark spike on Joey's Mac (done 9 Nov; open items: logit parity, apply/revert timing, LoRA on `lm_head`)
 
 This has to run on Joey's MacBook (128 GB), since that's where the baseline lives. Measure, for Qwen3.5-9B at the pinned revision in bf16, thinking off, with the same 5 probes and 2 controls:
 
@@ -129,7 +129,7 @@ Caveats to verify:
 - llama.cpp sets adapters per **context**, not per sequence, through `llama_set_adapters_lora(ctx, adapters, n, scales)`. Adapters must be loaded before the context is created, but they can be switched and rescaled without reloading ([guide](https://instagit.com/ggml-org/llama.cpp/how-to-use-lora-adapters-with-gguf-models)). For batched trials it needs one context per worker group, or our own patch.
 - Whether each engine lets LoRA target `lm_head` (the output projection) is unconfirmed. Many LoRA loaders only map attention and MLP projections.
 - mistral.rs says some GGUF architectures, such as Llama and Mistral 3, can't take adapters.
-- Exploration still needs a fast path. For `lm_head` rank-1 trials, the effect is just `logits += (δ/‖h‖²)(h·h_t)` per candidate, computed on top of a shared forward pass. No adapter machinery needed.
+- Exploration still needs a fast path. For `lm_head` rank-1 trials, the effect is just `logits[k] += (δ/‖h‖²)(h·h_t)` per candidate (only the edited token's logit moves), computed on top of a shared forward pass. No adapter machinery needed.
 
 ## Draft adapter contract
 
@@ -147,12 +147,22 @@ pub struct Capabilities {
     pub devices: Vec<Device>,   // Metal, CUDA, ROCm, Vulkan, CPU
 }
 
+/// One request. Deltas are activated per request, so concurrent workers can each carry different edits
+/// without mutating shared state. `apply`/`revert` below are for the single-user, in-place path.
+pub struct TraceRequest {
+    pub prompt: Prompt,              // messages + chat-template options (e.g. thinking off)
+    pub deltas: Vec<DeltaHandle>,    // per-request edits, empty = base model
+    pub decode: DecodeSpec,          // greedy/sampled, max tokens, decode path (batch vs stream), seed
+    pub taps: TapSpec,               // which layers/positions to return hidden states for
+    pub top_k: usize,                // logits returned per step
+}
+
 pub trait Backend {
     fn capabilities(&self) -> &Capabilities;
-    fn load(&mut self, model: ModelRef /* hf id + revision or local path */) -> Result<ModelInfo>;
+    fn load(&mut self, model: ModelRef /* hf id + revision or local path */) -> Result<ModelInfo>; // ModelInfo includes tied_embeddings
     fn tensor_index(&self) -> Vec<TensorInfo>;              // names, shapes, dtypes
     fn read_tensor(&self, name: &str, slice: Slice) -> Result<HostTensor>;
-    fn trace(&self, req: TraceRequest) -> Result<Trace>;     // tokens, top-k logits, gaps, taps
+    fn trace(&self, req: TraceRequest) -> Result<Trace>;     // generation + tokens, top-k logits, gaps, taps (covers `run`)
     fn apply(&mut self, delta: Delta) -> Result<DeltaHandle>; // low-rank delta on a named tensor
     fn revert(&mut self, h: DeltaHandle) -> Result<()>;
     fn score_trials(&self, base: TraceRequest, trials: &[Delta]) -> Result<Vec<TrialScore>>;
@@ -179,12 +189,12 @@ Everything above this trait (gates, keep rule, ledger, lineage, the agent API) i
 
 1. **Primary (full feature):** candle-based, reusing mistral.rs model code. Every hook, Metal and CUDA.
 2. **Breadth:** llama.cpp adapter for very large and quantized models and the widest architecture list. Run, trace and LoRA deltas.
-3. **Mac speed:** MLX adapter, if the benchmark shows a real gap on Apple silicon.
+3. **Mac speed:** MLX adapter. The benchmark shows mlx still leads on batched throughput (39.5 vs 26 prompts/s).
 4. **Reach:** burn for AMD, Vulkan and anything without CUDA or Metal.
 
 ## Updated next steps
 
-- Benchmark spike on Joey's Mac (Part 1 list), plus: does a rank-1 LoRA on `lm_head` reproduce edit-brief on each engine that accepts it?
+- ~~Benchmark spike on Joey's Mac~~ (done). Still open: does a rank-1 LoRA on `lm_head` reproduce edit-brief on each engine that accepts it?
 - Read mistral.rs internals for a hidden-state and logits hook. Upstreaming one may be cheaper than forking.
 - Check llama.cpp's eval-callback cost at every layer, and whether `output.weight` accepts LoRA.
 

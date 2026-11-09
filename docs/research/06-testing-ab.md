@@ -4,7 +4,7 @@
 
 ## The big idea: score edits from cached hidden states
 
-A rank-1 edit to `lm_head` leaves every hidden state unchanged. If we cache the final hidden state `h_x` for every prompt and position in a test set once, a candidate edit `W[k,:] += (δ/‖h‖²)·h` changes the logits at any cached `x` by
+A rank-1 edit to `lm_head` leaves every hidden state unchanged, **provided `lm_head` is not tied to the input embeddings**. With tied embeddings (some Gemma and small models), editing row k also changes token k's input embedding, and every prompt containing token k gets new hidden states. The engine must check `tied_embeddings` and untie, or fall back to decoding. Qwen3.5-9B appears untied, since its `lm_head` is read separately in our benchmark, but this hasn't been confirmed from its config. If we cache the final hidden state `h_x` for every prompt and position in a test set once, a candidate edit `W[k,:] += (δ/‖h‖²)·h` changes the logits at any cached `x` by
 
 `Δlogit_k(x) = δ · (h·h_x)/‖h‖² = δ · cos(h, h_x) · ‖h_x‖/‖h‖`.
 
@@ -32,7 +32,7 @@ Lessons that apply directly to us:
 
 - **Score by free generation, not teacher forcing.** "The Mirage of Model Editing" found that single-edit success falls from 96.8% to 38.5% under realistic generation ([2502.11177](https://arxiv.org/abs/2502.11177v4)).
 - **Report the worst case, not the mean.** A single edit can collapse a model while averaged metrics miss it. A cheap screen is perplexity on about 50 fixed sentences, with collapse at a perplexity above 1000 ([2402.09656](https://arxiv.org/pdf/2402.09656)).
-- **Require a margin.** "Keys to Robust Edits" requires the target to win by a logit gap ε (about 2.3 means 90% top-1) on every equivalent input ([2410.09338](https://arxiv.org/html/2410.09338v2)). Our benchmark showed why: Joey's edits flip between mlx batch and stream decoding.
+- **Require a margin.** "Keys to Robust Edits" requires the target to win by a logit gap ε (2.3 gives about 10:1 odds against **each** competitor; with several close competitors the top-1 probability is lower, so define ε against the log-sum-exp of the competitors) on every equivalent input ([2410.09338](https://arxiv.org/html/2410.09338v2)). Our benchmark showed why: Joey's edits flip between mlx batch and stream decoding.
 - **Edits stack badly.** General ability survives only a few dozen sequential ROME/MEMIT edits ([2410.18785](https://arxiv.org/abs/2410.18785)). AlphaEdit degrades past about 5k edits, and Llama3-8B MMLU falls from about 0.6 to 0.1 by 10k edits ([2606.26783](https://arxiv.org/pdf/2606.26783)). So we check the **cumulative stack**, not just each edit.
 - **Steering has side effects and "anti-steerable" inputs.** Close to half of inputs move the wrong way ([2407.12404](https://arxiv.org/pdf/2407.12404)). Steering also bleeds into behaviours it never targeted, which SteeringControl calls "entanglement" ([2509.13450](https://arxiv.org/html/2509.13450v1)).
 - **Quantization erodes edits,** most steeply from 4 to 2 bits ([2407.06483](https://arxiv.org/pdf/2407.06483)). Every edit must be re-checked in each format we ship.
@@ -73,7 +73,7 @@ Saturation matters less than people think. We check for regressions **against ou
   - "B better" only when the CI excludes 0.
   - Otherwise "no detectable difference (could detect ≥ X pp)".
   - Regression checks use non-inferiority ("B no worse than A by more than 2 pp").
-- **Sample sizes** (our calculation from the standard paired formula, unverified):
+- **Sample sizes** (our calculation from the standard paired formula n ≈ 7.85·Var(d)/δ² at α = 0.05 and 80% power, with Var(d) ≈ discordance rate − δ². The rows assume 15% discordance, except the 10 pp row at 20%. Unverified):
 
   | Effect to detect | Prompts or comparisons needed |
   |---|---|

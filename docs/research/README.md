@@ -7,6 +7,10 @@ Background:
 - Nusrat & Nusrat, *Weight-space programming for auditing clinical decision networks*, arXiv:2611.05341 (3 Nov 2026). Code: <https://github.com/hnusrat1/weightspace-rt>
 - Joey's Qwen3.5-9B concision campaign (8 Nov 2026), done with mlx-lm in [weight-space](https://github.com/jaylamping/weight-space). Key lessons: rank-1 `lm_head` edits only at near-ties, a per-prompt keep rule with controls, one resident model, in-memory apply and revert, and a ledger that includes rejects.
 
+## Gaps
+
+See [GAPS.md](GAPS.md): joe-review fixes, plus what this research track didn't cover yet.
+
 ## Tracks
 
 | # | Track | Status |
