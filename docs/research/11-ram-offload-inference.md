@@ -8,14 +8,14 @@ Joey asked how tools like "Strata" and "Infer" run very large models quickly on 
 
 - **Strata is real** ([Niko1221/Strata](https://github.com/Niko1221/Strata), MIT, C++/CUDA/HIP/Metal engine built partly on ggml, Tauri desktop app). It runs Qwen3.8-Flash-Next, marketed as "125B", at about **87 tok/s on a 12 GB RTX 5070 with 64 GB RAM** (maintainer's numbers).
 - **"Infer" is most likely [NInfer](https://github.com/Neroued/ninfer)**, a C++/CUDA engine that does CPU expert offload on an RTX 5090, and which Strata credits for ideas. It could also be **[PowerInfer](https://github.com/Tiiny-AI/PowerInfer)**, the older hot/cold-neuron engine. Both are covered below. This is a guess from the name.
-- **The trick is not that RAM is fast.** It's that these models are **sparse mixture-of-experts (MoE)**. Only ~10 of 24,576 experts run per token in Flash-Next, so each token touches a few GB of weights, not 125B parameters. The engines then:
+- **The trick is not that RAM is fast.** It's that these models are **sparse mixture-of-experts (MoE)**. Flash-Next routes 10 of 512 experts per layer (about 480 of 24,576 per token), so each token touches a few GB of weights, not 125B parameters. The engines then:
   1. keep everything that runs on **every** token (attention, routers, shared experts, output head, KV cache) on the GPU,
   2. fill the rest of VRAM with a **cache of the most-used experts**, learned from routing statistics,
   3. let the **CPU compute the cache misses in place** in pinned RAM, in parallel with the GPU, instead of copying them over PCIe,
   4. use very low-bit quantization (2 to 3 bits per weight),
-  5. stack **speculative decoding** on top (the model's own MTP head drafts 3 tokens, about 2.4 to 3.2 are accepted per pass), worth about 1.6 to 1.8×,
+  5. stack **speculative decoding** on top (the model's own MTP head drafts up to 3 tokens, and each verify pass emits 2.4 to 3.2 tokens on average), worth about 1.6 to 1.8×,
   6. read prompts in **huge chunks** (8,192 tokens), so each expert crosses PCIe once per chunk rather than once per token.
-- **None of this makes a dense bf16 model fast.** Qwen3.5-9B bf16 on Joey-PC is bound by physics: every token reads all 18 GB of weights, so the 12 to 13 GB that don't fit in the ~6 GB of free VRAM cap decode at roughly 4 to 6 tok/s whether the CPU computes them or PCIe streams them. The fix for the dense case is a **quantized body plus full-precision edited tensors**, which fits in VRAM (§5).
+- **None of this makes a dense bf16 model fast.** Qwen3.5-9B bf16 on Joey-PC is bound by physics: every token reads all 18 GB of weights, so the 12 to 13 GB that don't fit in the ~6 GB of free VRAM cap decode at roughly 4 to 6 tok/s whether the CPU computes them or PCIe streams them. The fix for the dense case is a **quantized body plus full-precision edited tensors**, about 7 GB with KV and overhead, which fits once the other apps release VRAM (§5).
 - **Weightless's workload is unusually offload-friendly.** Scoring many trials is batched, prefill-like work. Offload cost is paid per forward pass, not per sequence, so a batch of 64 trials pays the PCIe or CPU cost once. Strata's own prompt reading runs at 1,000 to 2,000 tok/s with experts streaming.
 - **Likely cause of the Joey-PC lockup:** on Windows, the NVIDIA driver's *Sysmem Fallback* silently spills VRAM overflow into shared system memory instead of failing, and pinned (page-locked) RAM can starve the OS. Strata documents both. Our engine needs a memory planner with hard budgets before it runs anything big on that machine (§6).
 
@@ -90,7 +90,7 @@ So "offloading to RAM" works when **most of what each token touches is already o
 | T4 | **Routing look-ahead prefetch** | Predict the next layer's experts from the current hidden state and start their copy early | Strata (`STRATA_LOOKAHEAD`), DAOP/DALI papers | No | Medium |
 | T5 | **Pinned memory + async copy streams** | `cudaHostAlloc` / `cudaHostRegister` so the GPU can DMA without staging; copies overlap compute on a separate stream | Everyone | Yes (streaming) | Yes |
 | T6 | **Big prompt chunks / ring buffer** | Each offloaded weight crosses PCIe once per chunk of 4K to 8K tokens; next layer streams while this layer computes | Strata (`--prefill`), llama.cpp `-b/-ub` | **Yes** | Yes |
-| T7 | **Layer streaming** | Whole layers copied in turn, double-buffered | FlexGen, AirLLM, mistral.rs CPU fallback | Only for big batches | Rarely |
+| T7 | **Layer streaming** | Whole layers copied in turn, double-buffered | FlexGen, AirLLM (mistral.rs's fallback instead runs those layers on the CPU) | Only for big batches | Rarely |
 | T8 | **Low-bit weights** | 2 to 4 bit (IQ2/IQ3/Q4, NVFP4), often mixed per tensor | Everyone | Yes | Yes |
 | T9 | **KV cache quantization** | int8 KV, or 4-bit V with a Hadamard rotation; frees VRAM for experts | Strata (`--kv int8/k8v4/q4_0`) | Yes | Yes |
 | T10 | **KV streaming** | Long context's KV in RAM, only the part attention reads stays resident (~13.7 KB RAM per token for Flash-Next) | Strata | Yes (long ctx) | Yes |
@@ -103,7 +103,7 @@ So "offloading to RAM" works when **most of what each token touches is already o
 
 Weightless isn't a chat server. The engine has to expose hidden states and full logits, apply and revert edits without reloading, and decide **near-tie edits where a logit gap under ~2 decides keep or reject** (track 1, track 6). That last point makes numerical stability matter more here than in any chat engine.
 
-**Hidden-state access: easy.** In every hybrid design the residual stream comes back to the GPU after each layer, because attention runs there. Capturing `h` at any layer costs the same as without offload. MoE engines also expose **router choices per token**: Strata has `--dump-routing`. That's free extra trace data for the navigator model (which experts fire on the prompts an edit affects).
+**Hidden-state access: easy.** In expert-offload designs the residual stream comes back to the GPU after each layer, because attention runs there. With whole-layer CPU offload the tap is on the CPU for those layers, which is still cheap to read. Capturing `h` at any layer costs the same as without offload. MoE engines also expose **router choices per token**: Strata has `--dump-routing`. That's free extra trace data for the navigator model (which experts fire on the prompts an edit affects).
 
 **Where the edited tensor lives: needs a rule.** With offload, a tensor can exist as a RAM master, a GPU cached copy, and a quantized form all at once. Applying an edit to one copy and not the others is a silent bug. Rule: **edits never mutate cached copies. They are applied as low-rank overlays at compute time** (track 2 already chose f32 row/factor overlays). For `lm_head` that's `logits += (h·v) u` on whichever device holds `h`. For an offloaded expert, the CPU kernel and the GPU kernel each need the overlay path, or edited experts get pinned to GPU. Edited tensors should be marked **pinned-to-GPU, full-precision** in the placement plan.
 
@@ -111,7 +111,7 @@ Weightless isn't a chat server. The engine has to expose hidden states and full 
 
 **Quantized base: already decided.** Edits stay as f32 overlays and never merge into quantized blocks (track 2). Offload doesn't change that. It makes it more important, since offload-friendly models are the low-bit ones.
 
-**KV quantization: changes logits.** An int8 or 4-bit KV cache perturbs logits by about as much as bf16 merge rounding. The gate must run with the same KV setting the user will run, or stay at bf16 KV for gating.
+**KV quantization: changes logits.** An int8 or 4-bit KV cache perturbs logits slightly (Strata measures +8–12% perplexity for 4-bit KV on long documents; we haven't measured int8). The gate must run with the same KV setting the user will run.
 
 **Speculative decoding: fine for output, watch the drafts.** Drafts are verified by the target model, so greedy output is unchanged up to the numerical issue above. If an edit touches a tensor the MTP head shares (it may share `lm_head` or embeddings; check per model), drafts follow the edit and acceptance stays high. If it doesn't, drafts get rejected more often near edited tokens and it gets slower. Not wrong, just slower.
 
@@ -124,13 +124,18 @@ Weightless isn't a chat server. The engine has to expose hidden states and full 
 | Plan | VRAM | Notes |
 |---|---|---|
 | bf16 everything | ~18 GB + KV | Doesn't fit the ~6 GB free |
-| **Q4 body (~4 GB) + `lm_head` bf16 (2.03 GB) + f32 row overlays** | **~6 GB + KV** | Tight; body quantized, the tensor we edit kept at full precision. Track 2 rule, applied. The input embedding (another ~1B params, if untied) is a row lookup and can stay in RAM. |
-| Q4 body on GPU, `lm_head` in RAM, logits on CPU | ~4 GB + KV | `lm_head` is 1.02B params. CPU GEMV ≈ 25 ms per token at bf16, amortized across a trial batch. Viable for scoring, slow for chat. |
+| **Q4 body (~4 GB) + `lm_head` bf16 (2.03 GB) + f32 row overlays** | **~7 GB** (see budget below) | Body quantized, the tensor we edit kept at full precision. The input embedding (another ~1B params; Qwen3.5-9B is untied, `tie_word_embeddings: false`) is a row lookup and can stay in RAM. Fits with the other apps closed, not next to them. |
+| Q4 body + Q8 `lm_head` (~1.1 GB) + f32 overlays of edited rows only | ~6 GB | Track 2's literal rule. Edited rows are exact, but competitor logits come from the Q8 rows, which matters for near-tie gaps. To be measured. |
+| Q4 body on GPU, `lm_head` in RAM, logits on CPU | ~4 GB + KV | `lm_head` is 1.02B params. CPU GEMV ≈ 25 ms per token at bf16, amortized across a trial batch. **Ruled out by the adopted plan** (edited tensors stay on the GPU) unless the CPU path applies the overlay and gating runs on that path. |
 | Q8 body | ~8 GB + `lm_head` | Only when SOLIDWORKS isn't running |
+
+Budget for the bold row (our estimates, not measured): body ~4.0 GB, `lm_head` 2.03 GB, KV ~0.25 GB at 8K context (only 8 of 32 layers have KV: 8 × 2 × 4 heads × 256 × 2 bytes ≈ 32 KB per token) plus the DeltaNet recurrent state, CUDA context and workspace ~0.7–1 GB. Total about 7 GB, against ~6 GB free when the other apps hold ~10 GB. A batch of trials adds KV and state per sequence.
+
+Another avenue on this card: the RTX 5080 is Blackwell, with FP4 tensor cores, so an **NVFP4 body** (NInfer and Strata both ship NVFP4 packs) is an option worth measuring for size and speed.
 
 Quantizing the body changes `h`, which changes which edits are near-ties. An edit found on the Q4 body must be re-gated on whatever precision it ships at (track 6 already requires this).
 
-**MoE models.** With ~6 GB of free VRAM and 64 GB RAM, Joey-PC is close to Strata's minimum tier (12 GB card, 64 GB RAM): Qwen3.6-35B-A3B should run comfortably and Flash-Next at a few bits should run, with fewer cached experts and so slower than the published numbers. The 14900K's 8 P-cores with AVX2 are the CPU expert compute; its E-cores should be avoided for those threads (Strata has thread-placement settings for this).
+**MoE models.** With ~6 GB of free VRAM and 64 GB RAM, Joey-PC is close to Strata's minimum tier (12 GB card, 64 GB RAM): Qwen3.6-35B-A3B and Flash-Next at a few bits should run (our extrapolation, half of Strata's minimum VRAM tier, unmeasured), with fewer cached experts and so slower than the published numbers. The 14900K's 8 P-cores with AVX2 are the CPU expert compute; its E-cores should be avoided for those threads (Strata has thread-placement settings for this).
 
 ## 6. The lockup on Joey-PC and how not to repeat it
 
@@ -149,7 +154,7 @@ What the Weightless engine should do, regardless of which backend runs:
 
 ## 7. Recommendations
 
-1. **Add placement and memory to the `Backend` contract** (track 1). Capability flags: `offload_layers`, `offload_experts`, `gpu_expert_cache`, `elastic_vram`, `deterministic_gate_mode`. A `PlacementPlan` names each tensor's home device, dtype and pinned/edited status. The planner in §6 produces it.
+1. **Add placement and memory to the `Backend` contract** (track 1). Capability flags: `offload_layers`, `offload_experts`, `gpu_expert_cache`, `elastic_vram`, `deterministic_gate_mode`, `top_logprobs`. `plan` feeds `load`, and gate mode is backend-wide state (`begin_gate`/`end_gate`), because placement and the expert cache are shared by every request. A `PlacementPlan` names each tensor's home device, dtype and pinned/edited status. The planner in §6 produces it.
 2. **Dense models: quantized body plus full-precision edited tensors, all on GPU.** Use layer offload only as a last resort, and only for batched scoring.
 3. **MoE models: llama.cpp-style tensor overrides first, then an expert cache.** The wave-2 llama.cpp backend gives `-ot`, `--n-cpu-moe` and `--moe-cache-mib` almost free. For the primary mistral.rs-based backend, expert offload has to be built. Strata (MIT) and llama.cpp (MIT) are the code to read: CPU expert kernels, pinned arena, routing look-ahead, cache profile.
 4. **Batch trials into large passes** so offload cost is shared. This belongs in track 5 (concurrent workers).
@@ -161,7 +166,7 @@ What the Weightless engine should do, regardless of which backend runs:
 
 - Does mistral.rs's topology file allow per-tensor CPU placement, for example experts only? Read the source.
 - Does Qwen3.5/3.8's MTP head share `lm_head`? Determines whether edits carry into drafts.
-- A light test on Joey-PC, **only after Joey clears it**: Qwen3.5-9B at Q4 body + bf16 `lm_head` through llama.cpp with `-ot "output=CUDA0"`, checking VRAM use and tok/s with SOLIDWORKS open. Optional: install Strata and run Qwen3.6-35B-A3B to see the MoE case first-hand.
+- A light test on Joey-PC, **only after Joey clears it**: Qwen3.5-9B at Q4 body + bf16 `lm_head` through llama.cpp (quantize with `llama-quantize --output-tensor-type bf16` so `output.weight` stays bf16; `-ot` only places tensors), checking VRAM use and tok/s with SOLIDWORKS open. Optional: install Strata and run Qwen3.6-35B-A3B to see the MoE case first-hand.
 - Is Joey-PC's Sysmem Fallback policy at the driver default? Worth checking before any more GPU runs.
 
 ## Sources
