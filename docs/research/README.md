@@ -22,6 +22,6 @@ See [GAPS.md](GAPS.md): joe-review fixes, plus what this research track didn't c
 | 5 | Concurrent workers on one loaded model (batched trials, multi-LoRA serving) | not started |
 | 6 | Testing and A/B suite: tiered gates, regression sets, paired A/B of snapshots, robustness across backends and decode paths, LLM-judge | [state-of-the-art report](06-testing-ab.md) |
 | 7 | Agent harness and providers (MCP, subscription OAuth, local models, routers, admission test) | not started |
-| 8 | Built-in navigator model (base model, ledger schema, training) | not started |
+| 8 | Built-in navigator model (base model, ledger schema, training) | [report](08-navigator-model.md) |
 | 9 | Desktop architecture (Tauri v2, in-process vs sidecar, IPC, packaging) | not started |
 | 10 | Visualization, someday (wgpu vs WebGPU, LOD tensor rendering) | not started |
