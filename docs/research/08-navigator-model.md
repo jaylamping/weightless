@@ -53,6 +53,8 @@ dial_request {
 }
 ```
 
+**Where the probes and controls come from (Joey, 9 Nov 2026):** either a **built-in validation suite** from the app's library, or one the driver **makes up on the spot** ("yolo"). So `probes`, `controls` and `protect` each take either a suite reference (`suite: "builtin:concision@1"`, `"builtin:math-guard@2"`, the track 6 tiers) or inline prompts. Built-in suites are named and versioned, so results stay comparable across sessions and models. Improvised suites are stored in full in the ledger and flagged `adhoc`. For training, outcomes on built-in suites count as the trusted labels, and outcomes on ad-hoc suites get less weight until their prompts are checked. An ad-hoc suite that keeps proving useful can be promoted into the library.
+
 The driver writes it (with Joey's words as context); the navigator can reply with typed questions back ("probes cover arithmetic only; include code?") before it starts.
 
 ## 2. Architecture: scorer, navigator LM, activation reader
