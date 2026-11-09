@@ -16,7 +16,7 @@ See [GAPS.md](GAPS.md): joe-review fixes, plus what this research track didn't c
 | # | Track | Status |
 |---|---|---|
 | 1 | Rust GPU inference engines | [report](01-inference-engines.md), [Mac benchmark](../../bench/track1/RESULTS.md) |
-| 2 | Model formats, size limits (no hard 10B cap), edit deltas vs snapshots | not started |
+| 2 | Model formats, size limits (no hard 10B cap), edit deltas vs snapshots | [report](02-formats-sizes-deltas.md) |
 | 3 | Weight-editing methods (ROME/MEMIT, rank-1, steering, model diffing, paper code) | not started |
 | 4 | Interpretability for the "see everything" view (logit lens, SAEs, attribution) | not started |
 | 5 | Concurrent workers on one loaded model (batched trials, multi-LoRA serving) | not started |
