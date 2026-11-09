@@ -22,6 +22,16 @@ From [the RAM-offload report](11-ram-offload-inference.md):
 9. **Later, chat speed only:** MTP speculative decoding, prompt lookup and big prompt chunks.
 10. **Router traces** (which experts fire per token) are recorded in the trace and ledger as navigator training data (track 8).
 
+### Serving engines inside the app (Joey, 9 Nov 2026)
+
+Joey wants fast serving engines like Strata in the app too, not just as research. Plan:
+
+- **"Serve" mode.** After editing, run the edited model through a fast engine and expose it on a local OpenAI/Anthropic-compatible API, so Joey can chat with it or point coding agents at it. Editing and gating stay on the primary backend; serving engines are run-only adapters (`run` capability, no taps or apply/revert needed).
+- **How edits get there:** export the deltas to the engine's format (merged safetensors, patched GGUF `output.weight`, or a LoRA where accepted, per track 2), then re-gate the exported artifact on that engine, since quantization and kernels can flip near-tie edits.
+- **Candidates:** llama.cpp (`llama-server`, already wave 2), Strata (MIT, GGUF, MoE models only: Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, DeepSeek V4.1-Flash), mistral.rs server, mlx-lm server on Mac. NInfer is Linux-only and 5090/Spark-tuned, so later.
+- **Packaging:** run each engine as a managed sidecar process (download per GPU type, like Strata's app does), with the memory planner deciding whether it fits next to the editing engine or replaces it.
+- **Scoreboard:** serving engines join the parity harness, so we can see whether an edit survives each one.
+
 ## Gaps
 
 See [GAPS.md](GAPS.md): joe-review fixes, plus what this research track didn't cover yet.
