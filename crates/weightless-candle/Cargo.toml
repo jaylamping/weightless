@@ -1,0 +1,25 @@
+[package]
+name = "weightless-candle"
+description = "Primary Weightless backend on the candle stack (the same stack mistral.rs builds on)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+candle-core.workspace = true
+candle-nn.workspace = true
+candle-transformers.workspace = true
+tokenizers.workspace = true
+weightless-core.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

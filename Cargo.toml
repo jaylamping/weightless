@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/weightless-core",
+    "crates/weightless-candle",
+    "crates/weightless-cli",
+    "app/src-tauri",
+]
+default-members = [
+    "crates/weightless-core",
+    "crates/weightless-candle",
+    "crates/weightless-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jaylamping/weightless"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+clap = { version = "4", features = ["derive"] }
+weightless-core = { path = "crates/weightless-core" }
+weightless-candle = { path = "crates/weightless-candle" }
+
+[profile.dev.package."*"]
+# Model math is unusably slow unoptimized, even in debug builds.
+opt-level = 3
