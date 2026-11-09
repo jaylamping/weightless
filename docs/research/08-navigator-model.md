@@ -133,7 +133,7 @@ Real use will produce a few hundred candidates a day at best. That's not enough,
 1. **Synthetic campaigns (the main source).** A headless runner loads small targets (Qwen3.5-0.8B and 2B first, then a Gemma, a Llama-style and an MoE model for diversity), picks goals from templates (concision, change a fact, change a format, persona words, stop a loop, change a refusal), and proposes candidates with heuristics: Joey's near-tie rank-1 rule, random rows, perturbed deltas, deliberately bad whole-row adds. The cached-hidden-state shortcut (track 6) scores an `lm_head` rank-1 candidate with a matrix multiply, so a Mac can label **millions** of candidates overnight. That covers T1, T2 and T3. Edits deeper than `lm_head` need real decoding and are slower, so they get a smaller, targeted share.
 2. **Import Joey's weight-space campaign.** The Qwen3.5-9B concision run (8 Nov) has real keeps and rejects with Joey's keep rule. Convert it into the schema as a seed set and as a held-out sanity check ("does the scorer agree with Joey's verdicts?").
 3. **Public editing datasets** for fact-edit goals: CounterFact and zsRE ([2202.05262](https://arxiv.org/abs/2202.05262)), MQuAKE for multi-hop ([2305.14795](https://arxiv.org/abs/2305.14795)).
-4. **Teacher trajectories for T4/T5.** Let a strong model drive the engine directly (no navigator) on a task suite, and record every turn. The default teacher is a **local open-weight model on the Mac** (Qwen3.6-35B-A3B or Qwen3.8-27B, both Apache 2.0): free, private, no provider terms to worry about. Frontier models (Opus, Fable, Sol, Astra) can add higher-quality trajectories, but some provider terms limit training on outputs, so check each before using them as training data.
+4. **Teacher trajectories for T4/T5.** Let a frontier model (Opus, Fable, Sol, Astra, Joey's allowlist) drive the engine directly (no navigator) on a task suite, and record every turn. **Joey's decision (9 Nov 2026): the teacher is a frontier model.** A local open-weight model on the Mac (Qwen3.6-35B-A3B or Qwen3.8-27B, Apache 2.0) can add cheap bulk trajectories if API cost becomes the limit. Some provider terms restrict training on outputs, so note which provider each trajectory came from in the ledger (`turn` rows already record the agent model).
 5. **Only then, real sessions.** Every real session appends to the ledger, and the navigator is retrained on a schedule.
 
 ## 7. Fine-tuning method, in stages
@@ -187,7 +187,7 @@ Baselines: random proposals, Joey's hand rules, the frontier agent alone, and Ge
 ## 11. Decisions for Joey
 
 1. **Base model:** Qwen3.5-2B as default, with 0.8B lite and 4B step-up (recommended), or Gemma 4 E2B as the default instead.
-2. **Teacher for planning data:** a local open-weight model on the Mac (recommended, free and private) or frontier APIs.
+2. **Teacher for planning data:** frontier models (decided by Joey, 9 Nov 2026), with a local open-weight model as an optional bulk supplement.
 3. **Training hardware:** Mac for stages 0–2 (recommended), a rented GPU for stage 3, and Joey-PC only when cleared.
 
 ## 12. Next steps
