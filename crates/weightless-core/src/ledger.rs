@@ -132,7 +132,16 @@ pub struct TrialRecord {
     pub results: Vec<ProbeResult>,
     pub verdict: Verdict,
     pub wall_ms: u64,
+    /// Currently part of the working model. Past keeps and reverts are in the trial's events.
     pub kept: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotRow {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub trial_id: Option<String>,
+    pub delta_ids: Vec<String>,
 }
 
 pub struct Ledger {
@@ -156,6 +165,8 @@ impl Ledger {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        // The app and the CLI may write the same ledger; wait instead of failing on a busy lock.
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.execute_batch(SCHEMA)?;
         conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?1)",
@@ -243,14 +254,42 @@ impl Ledger {
             .transpose()
     }
 
+    /// Mark a trial kept and record the snapshot it creates, atomically.
     pub fn mark_kept(&self, trial_id: &str, snapshot_id: &str, parent: Option<&str>, delta_ids: &[String], session_id: &str) -> Result<()> {
-        self.conn.execute("UPDATE trials SET kept = 1 WHERE id = ?1", params![trial_id])?;
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("UPDATE trials SET kept = 1 WHERE id = ?1", params![trial_id])?;
+        tx.execute(
             "INSERT INTO snapshots (id, session_id, parent_id, trial_id, created_at, delta_ids_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![snapshot_id, session_id, parent, trial_id, now(), serde_json::to_string(delta_ids)?],
         )?;
-        self.event(trial_id, EventKind::Kept, None)
+        self.event(trial_id, EventKind::Kept, None)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Clear a trial's `kept` flag (it means "currently kept") and log the revert, atomically.
+    pub fn mark_unkept(&self, trial_id: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("UPDATE trials SET kept = 0 WHERE id = ?1", params![trial_id])?;
+        self.event(trial_id, EventKind::RevertedLater, None)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Snapshot rows of a session in creation order.
+    pub fn snapshots(&self, session_id: &str) -> Result<Vec<SnapshotRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_id, trial_id, delta_ids_json FROM snapshots WHERE session_id = ?1 ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?))
+        })?;
+        rows.map(|r| {
+            let (id, parent_id, trial_id, d) = r?;
+            Ok(SnapshotRow { id, parent_id, trial_id, delta_ids: serde_json::from_str(&d)? })
+        })
+        .collect()
     }
 
     pub fn event(&self, trial_id: &str, kind: EventKind, detail: Option<serde_json::Value>) -> Result<()> {
@@ -367,6 +406,8 @@ impl Ledger {
             out.write_all(b"\n")?;
             n += 1;
         }
+        // Surface write errors instead of losing them when a BufWriter is dropped.
+        out.flush()?;
         Ok(n)
     }
 }

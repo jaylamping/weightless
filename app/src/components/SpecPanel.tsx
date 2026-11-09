@@ -31,7 +31,7 @@ export default function SpecPanel({ status, onChanged, onError }: Props) {
         <h2>Spec</h2>
         <p className="muted">
           The goal, the probes an edit should improve, and the controls it must leave unchanged. Applying a new spec
-          starts a new ledger session, so rows never mix specs.
+          starts a new ledger session from the base model (kept edits are reverted), so rows never mix specs.
         </p>
         <textarea className="mono code" spellCheck={false} value={text} onChange={(e) => setText(e.target.value)} />
         <div className="row">

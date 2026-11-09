@@ -55,7 +55,10 @@ export default function TrialsPanel({ status, epoch, onChanged, onError }: Props
     }
   };
 
+  const lastKept = status.snapshot.trials[status.snapshot.trials.length - 1];
   const kept = new Set(status.snapshot.trials);
+  // A trial can be kept only if it passed against the current model state.
+  const current = (t: TrialRecord) => t.session_id === status.session_id && t.snapshot_id === status.snapshot.id;
   const num = (k: keyof ExploreOptions) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setOpts({ ...opts, [k]: Number(e.target.value) });
 
@@ -116,7 +119,17 @@ export default function TrialsPanel({ status, epoch, onChanged, onError }: Props
                   <td className="mono">{t.wall_ms}</td>
                   <td onClick={(e) => e.stopPropagation()}>
                     {kept.has(t.id) ? (
-                      <button onClick={() => act(() => api.unkeep(t.id))}>Unkeep</button>
+                      <button
+                        disabled={t.id !== lastKept}
+                        title={t.id !== lastKept ? "Unkeep the most recent edit first" : ""}
+                        onClick={() => act(() => api.unkeep(t.id))}
+                      >
+                        Unkeep
+                      </button>
+                    ) : t.verdict.keep && !current(t) ? (
+                      <button title="Gated on an earlier model state" onClick={() => act(() => api.retest(t.id))}>
+                        Re-test
+                      </button>
                     ) : (
                       <button disabled={!t.verdict.keep} onClick={() => act(() => api.keep(t.id))}>
                         Keep

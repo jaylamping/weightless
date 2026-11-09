@@ -43,6 +43,9 @@ impl Delta {
     /// Joey's kept-edit form: `W[k,:] += (δ/‖h‖²) h`. At hidden state `h` this raises logit `k`
     /// by exactly `delta_logit` and leaves every other logit untouched.
     pub fn logit_nudge(tensor: &str, token: u32, h: &[f32], delta_logit: f32) -> Result<Delta> {
+        if !delta_logit.is_finite() {
+            bail!("logit shift must be finite (got {delta_logit})");
+        }
         let norm2: f32 = h.iter().map(|x| x * x).sum();
         if !norm2.is_finite() || norm2 <= 0.0 {
             bail!("hidden state has zero or non-finite norm");
@@ -101,15 +104,27 @@ impl Delta {
         t.v.iter().map(|x| x / n).collect()
     }
 
-    /// Max absolute element of the dense delta (for the fp16/bf16 magnitude gate, cf. the paper's 1e5 lesson).
+    /// Upper bound on the largest absolute element of the dense delta (for the fp16/bf16 magnitude
+    /// gate, cf. the paper's 1e5 lesson). Terms are summed per row, so overlapping terms are covered.
+    /// Any non-finite value yields infinity, which fails the gate.
     pub fn max_abs(&self) -> f32 {
-        self.terms
-            .iter()
-            .flat_map(|t| {
-                let vmax = t.v.iter().fold(0f32, |m, x| m.max(x.abs()));
-                t.u.iter().map(move |(_, w)| (w * vmax * self.scale).abs())
-            })
-            .fold(0f32, f32::max)
+        if !self.is_finite() {
+            return f32::INFINITY;
+        }
+        let mut per_row: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
+        for t in &self.terms {
+            let vmax = t.v.iter().fold(0f32, |m, x| m.max(x.abs()));
+            for (r, w) in &t.u {
+                *per_row.entry(*r).or_default() += (w * vmax * self.scale).abs();
+            }
+        }
+        per_row.values().copied().fold(0f32, f32::max)
+    }
+
+    /// True when the scale and every vector entry are finite.
+    pub fn is_finite(&self) -> bool {
+        self.scale.is_finite()
+            && self.terms.iter().all(|t| t.v.iter().all(|x| x.is_finite()) && t.u.iter().all(|(_, w)| w.is_finite()))
     }
 
     /// A copy without the dense vectors, for JSON rows. Vectors go to the ledger blob column.
@@ -161,5 +176,15 @@ mod tests {
         assert_eq!(logits[3], 4.0);
         assert!((d.logit_shift(2, &h) - 3.0).abs() < 1e-5);
         assert_eq!(d.logit_shift(1, &h), 0.0);
+    }
+
+    #[test]
+    fn non_finite_deltas_are_rejected_or_flagged() {
+        let h = vec![1.0, 2.0];
+        assert!(Delta::logit_nudge("w", 0, &h, f32::NAN).is_err());
+        let mut d = Delta::logit_nudge("w", 0, &h, 1.0).unwrap();
+        d.scale = f32::NAN;
+        assert!(!d.is_finite());
+        assert_eq!(d.max_abs(), f32::INFINITY);
     }
 }

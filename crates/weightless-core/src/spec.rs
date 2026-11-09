@@ -45,6 +45,29 @@ pub struct Spec {
 }
 
 impl Spec {
+    /// Probe ids must be unique and non-empty, and there must be at least one probe.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.probes.iter().any(|p| p.role == ProbeRole::Probe) {
+            anyhow::bail!("spec needs at least one probe (role \"probe\")");
+        }
+        let mut seen = std::collections::HashSet::new();
+        for p in &self.probes {
+            if p.id.trim().is_empty() {
+                anyhow::bail!("probe ids must not be empty");
+            }
+            if !seen.insert(p.id.as_str()) {
+                anyhow::bail!("duplicate probe id {:?}", p.id);
+            }
+        }
+        if self.max_new_tokens == 0 || self.top_k < 2 {
+            anyhow::bail!("max_new_tokens must be > 0 and top_k >= 2");
+        }
+        if !self.max_abs_delta.is_finite() || self.max_abs_delta <= 0.0 {
+            anyhow::bail!("max_abs_delta must be a positive finite number");
+        }
+        Ok(())
+    }
+
     pub fn probe(&self, id: &str) -> Option<&Probe> {
         self.probes.iter().find(|p| p.id == id)
     }

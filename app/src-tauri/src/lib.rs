@@ -84,8 +84,14 @@ async fn load_model(state: State<'_, AppState>, path: String, options: LoadOptio
 #[tauri::command]
 async fn status(state: State<'_, AppState>) -> CmdResult<Option<Status>> {
     let p = state.ledger_path.display().to_string();
-    let guard = state.wb.lock().map_err(err)?;
-    guard.as_ref().map(|wb| status_of(wb, &p)).transpose().map_err(err)
+    let wb = state.wb.clone();
+    // Lock on a blocking thread: an explore can hold the lock for minutes.
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = wb.lock().map_err(err)?;
+        guard.as_ref().map(|wb| status_of(wb, &p)).transpose().map_err(err)
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -159,6 +165,12 @@ async fn unkeep(state: State<'_, AppState>, trial_id: String) -> CmdResult<Snaps
     with_wb(&state, move |wb| wb.unkeep(&trial_id)).await
 }
 
+/// Run a logged trial's delta again on the current model state.
+#[tauri::command]
+async fn retest(state: State<'_, AppState>, trial_id: String) -> CmdResult<TrialRecord> {
+    with_wb(&state, move |wb| wb.retest(&trial_id)).await
+}
+
 #[tauri::command]
 async fn trials(state: State<'_, AppState>, limit: usize, all_sessions: bool) -> CmdResult<Vec<TrialRecord>> {
     with_wb(&state, move |wb| {
@@ -172,7 +184,9 @@ async fn trials(state: State<'_, AppState>, limit: usize, all_sessions: bool) ->
 async fn export_ledger(state: State<'_, AppState>, path: String, vectors: bool) -> CmdResult<usize> {
     with_wb(&state, move |wb| {
         let mut f = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        wb.ledger().export_jsonl(&mut f, vectors)
+        let n = wb.ledger().export_jsonl(&mut f, vectors)?;
+        std::io::Write::flush(&mut f)?;
+        Ok(n)
     })
     .await
 }
@@ -198,6 +212,7 @@ pub fn run() {
             explore,
             keep,
             unkeep,
+            retest,
             trials,
             export_ledger
         ])

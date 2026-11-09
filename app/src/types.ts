@@ -91,6 +91,7 @@ export interface ProbeResult {
   tokens_changed: number | null;
   identical: boolean | null;
   answer_ok: boolean | null;
+  base_has_answer?: boolean | null;
   predicted_first_flip: number | null;
   new_text: string | null;
 }

@@ -67,7 +67,8 @@ enum Cmd {
         max_gap: f32,
         #[arg(long, default_value_t = 0.5)]
         margin: f32,
-        /// Keep trials that pass every gate (then stop; re-run to continue from the new snapshot).
+        /// Keep the first trial that passes every gate, then stop. Kept edits last only for this
+        /// process: a new run starts from the base model again.
         #[arg(long)]
         auto_keep: bool,
     },
@@ -152,6 +153,7 @@ fn main() -> Result<()> {
             let l = Ledger::open(&ledger)?;
             let mut f = std::io::BufWriter::new(std::fs::File::create(&out)?);
             let n = l.export_jsonl(&mut f, vectors)?;
+            std::io::Write::flush(&mut f)?;
             eprintln!("wrote {n} trials to {}", out.display());
         }
         Cmd::DefaultSpec => println!("{}", serde_json::to_string_pretty(&Spec::default())?),

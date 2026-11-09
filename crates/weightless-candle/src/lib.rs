@@ -336,6 +336,12 @@ impl Backend for CandleBackend {
         if delta.terms.iter().any(|t| t.v.len() != self.info.hidden_size) {
             bail!("delta input dim does not match hidden size {}", self.info.hidden_size);
         }
+        if !delta.is_finite() {
+            bail!("delta {} has non-finite values", delta.id);
+        }
+        if let Some(r) = delta.rows().into_iter().find(|r| *r as usize >= self.info.vocab_size) {
+            bail!("delta row {r} is outside the vocabulary ({})", self.info.vocab_size);
+        }
         if self.deltas.iter().any(|d| d.id == delta.id) {
             bail!("delta {} already applied", delta.id);
         }

@@ -20,6 +20,7 @@ export const api = {
   explore: (options: ExploreOptions) => invoke<TrialRecord[]>("explore", { options }),
   keep: (trialId: string) => invoke<Snapshot>("keep", { trialId }),
   unkeep: (trialId: string) => invoke<Snapshot>("unkeep", { trialId }),
+  retest: (trialId: string) => invoke<TrialRecord>("retest", { trialId }),
   trials: (limit: number, allSessions: boolean) => invoke<TrialRecord[]>("trials", { limit, allSessions }),
   exportLedger: (path: string, vectors: boolean) => invoke<number>("export_ledger", { path, vectors }),
   onTrial: (cb: (t: TrialRecord) => void): Promise<UnlistenFn> => listen<TrialRecord>("trial", (e) => cb(e.payload)),

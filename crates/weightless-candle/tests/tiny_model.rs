@@ -12,6 +12,31 @@ use weightless_core::spec::{Objective, Probe, ProbeRole, Spec};
 use weightless_core::{ExploreOptions, Ledger, Workbench};
 
 const VOCAB: usize = 64;
+const SEED: u64 = 7;
+
+/// Deterministic weights (candle's CPU RNG can't be seeded): every run builds the same model.
+fn fill_deterministic(vm: &VarMap) {
+    let data = vm.data().lock().unwrap();
+    let mut names: Vec<&String> = data.keys().collect();
+    names.sort();
+    let mut state = SEED;
+    for name in names {
+        let var = &data[name];
+        if name.ends_with("norm.weight") {
+            continue; // RMSNorm weights stay at 1.
+        }
+        let dims = var.dims().to_vec();
+        let n: usize = dims.iter().product();
+        let a = if name.contains("embed_tokens") { 1.0 } else { 1.0 / (*dims.last().unwrap() as f32).sqrt() };
+        let vals: Vec<f32> = (0..n)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((state >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * a
+            })
+            .collect();
+        var.set(&candle_core::Tensor::from_vec(vals, dims, &Device::Cpu).unwrap()).unwrap();
+    }
+}
 
 fn write_tiny_model(dir: &Path) {
     let cfg = serde_json::json!({
@@ -27,6 +52,7 @@ fn write_tiny_model(dir: &Path) {
     let vm = VarMap::new();
     let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
     qwen3::ModelForCausalLM::new(&c, vb).unwrap();
+    fill_deterministic(&vm);
     vm.save(dir.join("model.safetensors")).unwrap();
 
     let vocab: serde_json::Map<String, serde_json::Value> =
@@ -123,22 +149,78 @@ fn explore_writes_ledger_and_preflight_is_exact() {
         }
     }
 
-    // Keep the first passing trial (if any), and check the baseline moved and lineage was written.
-    if let Some(good) = recs.iter().find(|r| r.verdict.keep) {
-        let site = good.delta["origin"]["probe_id"].as_str().unwrap().to_string();
-        let before = wb.baseline().unwrap().to_vec();
-        let snap = wb.keep(&good.id).unwrap();
-        assert_eq!(snap.trials, vec![good.id.clone()]);
-        let after = wb.baseline().unwrap().to_vec();
-        let i = wb.spec().probes.iter().position(|p| p.id == site).unwrap();
-        assert_ne!(before[i].token_ids(), after[i].token_ids());
-        wb.unkeep(&good.id).unwrap();
-        assert_eq!(wb.baseline().unwrap()[i].token_ids(), before[i].token_ids());
+    // Keep/unkeep lineage. The seeded model always yields passing trials, so this always runs.
+    let passing: Vec<_> = recs.iter().filter(|r| r.verdict.keep).collect();
+    assert!(passing.len() >= 2, "seeded model should give at least 2 passing trials, got {}", passing.len());
+    let failing = recs.iter().find(|r| !r.verdict.keep).expect("some trial should fail");
+    assert!(wb.keep(&failing.id).unwrap_err().to_string().contains("did not pass"));
+
+    let (g1, g2) = (passing[0], passing[1]);
+    let site = g1.delta["origin"]["probe_id"].as_str().unwrap().to_string();
+    let i = wb.spec().probes.iter().position(|p| p.id == site).unwrap();
+    let before = wb.baseline().unwrap().to_vec();
+    let s1 = wb.keep(&g1.id).unwrap();
+    assert_eq!(s1.trials, vec![g1.id.clone()]);
+    let after = wb.baseline().unwrap().to_vec();
+    assert_ne!(before[i].token_ids(), after[i].token_ids());
+    let snaps = wb.ledger().snapshots(wb.session_id()).unwrap();
+    assert_eq!(snaps.len(), 1);
+    assert_eq!((snaps[0].id.as_str(), snaps[0].parent_id.as_deref()), (s1.id.as_deref().unwrap(), None));
+    assert_eq!(wb.ledger().counts(wb.session_id()).unwrap().2, 1);
+    assert!(wb.ledger().trial(&g1.id).unwrap().unwrap().kept);
+
+    // g2 was gated on the base model, not on s1: keeping it must be refused until re-tested.
+    assert!(wb.keep(&g2.id).unwrap_err().to_string().contains("different model state"));
+    let re = wb.retest(&g2.id).unwrap();
+    assert_eq!(re.snapshot_id, s1.id);
+    assert_eq!(re.decision_id, g2.decision_id);
+    // Pre-flight stays exact with a kept delta active.
+    if re.verdict.stage == "decode" {
+        for pr in &re.results {
+            assert_eq!(pr.predicted_first_flip, pr.first_divergence, "retest probe {}", pr.probe_id);
+        }
     }
+    let more = wb.explore(&ExploreOptions { budget: 6, ..opts.clone() }, &mut |_| {}).unwrap();
+    for r in more.iter().filter(|r| r.verdict.stage == "decode") {
+        assert_eq!(r.snapshot_id, s1.id);
+        for pr in &r.results {
+            assert_eq!(pr.predicted_first_flip, pr.first_divergence, "stacked probe {} in {}", pr.probe_id, r.id);
+        }
+    }
+    let stacked = std::iter::once(&re).chain(more.iter()).find(|r| r.verdict.keep);
+    let g = stacked.expect("seeded model should give a passing trial on top of the first keep");
+    {
+        let s2 = wb.keep(&g.id).unwrap();
+        let snaps = wb.ledger().snapshots(wb.session_id()).unwrap();
+        assert_eq!(snaps.len(), 2);
+        assert_eq!(snaps[1].parent_id, s1.id, "second snapshot's parent is the first");
+        assert_eq!(snaps[1].delta_ids.len(), 2);
+        // Only the most recent keep can be undone.
+        assert!(wb.unkeep(&g1.id).is_err());
+        let back = wb.unkeep(&g.id).unwrap();
+        assert_eq!(back.id, s1.id, "unkeep returns to the parent snapshot, which exists in the ledger");
+        assert_ne!(back.id, s2.id);
+    }
+    let base_again = wb.unkeep(&g1.id).unwrap();
+    assert_eq!(base_again.id, None);
+    assert!(!wb.ledger().trial(&g1.id).unwrap().unwrap().kept);
+    assert_eq!(wb.ledger().counts(wb.session_id()).unwrap().2, 0);
+    assert_eq!(wb.baseline().unwrap()[i].token_ids(), before[i].token_ids());
+
+    // A new spec starts from the base model.
+    wb.keep(&g1.id).unwrap();
+    assert_eq!(wb.backend().active_deltas().len(), 1);
+    let session = wb.session_id().to_string();
+    wb.set_spec(wb.spec().clone()).unwrap();
+    assert!(wb.backend().active_deltas().is_empty());
+    assert_eq!(wb.snapshot().id, None);
+    assert_ne!(wb.session_id(), session);
 
     let mut out = Vec::new();
     let n = wb.ledger().export_jsonl(&mut out, false).unwrap();
-    assert_eq!(n, 12);
+    let (total, _, _) = wb.ledger().counts(&session).unwrap();
+    assert_eq!(n as i64, total);
+    assert!(total >= 13);
     let first: serde_json::Value = serde_json::from_slice(out.split(|c| *c == b'\n').next().unwrap()).unwrap();
     assert_eq!(first["schema_version"], 1);
     assert_eq!(first["proposer"], "heuristic:near_tie");
@@ -147,6 +229,4 @@ fn explore_writes_ledger_and_preflight_is_exact() {
     assert!(first.get("delta_full").is_none());
     assert_eq!(first["request"]["id"], req_id.as_str());
     assert_eq!(first["request"]["user_words"], "make it different");
-    let (total, _, _) = wb.ledger().counts(wb.session_id()).unwrap();
-    assert_eq!(total, 12);
 }

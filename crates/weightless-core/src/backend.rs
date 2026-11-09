@@ -37,7 +37,8 @@ pub struct Capabilities {
     pub devices: Vec<String>,
 }
 
-/// Identity of a loaded model. `fingerprint` ties ledger rows to exact weights.
+/// Identity of a loaded model. `fingerprint` ties ledger rows to the model's config and tensor
+/// layout (not its weight bytes; `path` and `id` are recorded alongside).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,

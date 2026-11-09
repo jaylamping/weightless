@@ -4,7 +4,7 @@
 use crate::backend::{Backend, Trace, TraceRequest};
 use crate::delta::{new_id, Delta, NudgeOrigin};
 use crate::gate::{self, GateResult, ProbeResult, ReasonCode, Verdict};
-use crate::ledger::{now, EventKind, Ledger, Prediction, TrialRecord};
+use crate::ledger::{now, Ledger, Prediction, TrialRecord};
 use crate::spec::{ProbeRole, Spec};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,9 @@ pub struct Snapshot {
     pub deltas: Vec<Delta>,
     /// Trial ids in keep order.
     pub trials: Vec<String>,
+    /// Snapshot id before each keep (the parent), so unkeeping the last edit returns to a
+    /// snapshot that exists in the ledger.
+    pub parents: Vec<Option<String>>,
 }
 
 /// One candidate edit to try.
@@ -57,6 +60,7 @@ pub struct Workbench {
 
 impl Workbench {
     pub fn new(backend: Box<dyn Backend>, ledger: Ledger, spec: Spec) -> Result<Self> {
+        spec.validate()?;
         let mut wb = Self {
             backend,
             spec,
@@ -91,8 +95,14 @@ impl Workbench {
         &self.snapshot
     }
 
-    /// A new spec starts a new ledger session (rows must not mix specs silently).
+    /// A new spec starts a new ledger session from the base model: kept edits are reverted, so
+    /// rows never mix specs and every new trial is gated against a model state its session knows.
     pub fn set_spec(&mut self, spec: Spec) -> Result<()> {
+        spec.validate()?;
+        for d in self.snapshot.deltas.iter().rev() {
+            self.backend.revert(&d.id)?;
+        }
+        self.snapshot = Snapshot::default();
         self.spec = spec;
         self.baseline = None;
         self.request_id = None;
@@ -196,7 +206,7 @@ impl Workbench {
             .filter(|(p, f)| p.role == ProbeRole::Control && f.is_some())
             .map(|(p, _)| p.id.clone())
             .collect();
-        let mag_ok = c.delta.max_abs() <= self.spec.max_abs_delta;
+        let mag_ok = c.delta.max_abs().is_finite() && c.delta.max_abs() <= self.spec.max_abs_delta;
 
         let verdict = if !control_spill.is_empty() || !mag_ok {
             for (i, p) in self.spec.probes.iter().enumerate() {
@@ -209,6 +219,7 @@ impl Workbench {
                     tokens_changed: None,
                     identical: None,
                     answer_ok: None,
+                    base_has_answer: None,
                     predicted_first_flip: predicted[i],
                     new_text: None,
                 });
@@ -289,32 +300,72 @@ impl Workbench {
     }
 
     /// Make a trial's delta part of the working model. Snapshot = parent + this delta.
+    ///
+    /// Only a trial that passed its gates against the *current* model state can be kept, so every
+    /// snapshot in the ledger is a stack that was gated as a whole. Re-test stale trials first.
     pub fn keep(&mut self, trial_id: &str) -> Result<Snapshot> {
+        let rec = self.ledger.trial(trial_id)?.with_context(|| format!("no trial {trial_id}"))?;
+        if !rec.verdict.keep {
+            bail!("trial {trial_id} did not pass its gates");
+        }
+        if rec.session_id != self.session_id || rec.snapshot_id != self.snapshot.id {
+            bail!("trial {trial_id} was gated against a different model state; re-test it on the current one first");
+        }
         let delta = self.ledger.load_delta(trial_id)?;
         if self.snapshot.deltas.iter().any(|d| d.id == delta.id) {
             bail!("trial {trial_id} is already kept");
         }
         self.backend.apply(&delta)?;
+        self.baseline = None;
         let parent = self.snapshot.id.clone();
+        let snap_id = new_id("snap");
+        let mut ids: Vec<String> = self.snapshot.deltas.iter().map(|d| d.id.clone()).collect();
+        ids.push(delta.id.clone());
+        if let Err(e) = self.ledger.mark_kept(trial_id, &snap_id, parent.as_deref(), &ids, &self.session_id) {
+            self.backend.revert(&delta.id)?;
+            return Err(e);
+        }
         self.snapshot.deltas.push(delta);
         self.snapshot.trials.push(trial_id.to_string());
-        self.snapshot.id = Some(new_id("snap"));
-        let ids: Vec<String> = self.snapshot.deltas.iter().map(|d| d.id.clone()).collect();
-        self.ledger.mark_kept(trial_id, self.snapshot.id.as_deref().unwrap(), parent.as_deref(), &ids, &self.session_id)?;
-        self.baseline = None;
+        self.snapshot.parents.push(parent);
+        self.snapshot.id = Some(snap_id);
         Ok(self.snapshot.clone())
     }
 
-    /// Take a kept delta back out of the working model.
+    /// Take the most recently kept delta back out, returning to its parent snapshot. Only the last
+    /// keep can be undone: removing one from the middle would leave a stack that was never gated.
     pub fn unkeep(&mut self, trial_id: &str) -> Result<Snapshot> {
-        let pos = self.snapshot.trials.iter().position(|t| t == trial_id).context("trial is not kept")?;
-        let d = self.snapshot.deltas.remove(pos);
-        self.snapshot.trials.remove(pos);
+        if self.snapshot.trials.last().map(String::as_str) != Some(trial_id) {
+            bail!("only the most recently kept trial can be unkept");
+        }
+        let d = self.snapshot.deltas.last().unwrap().clone();
         self.backend.revert(&d.id)?;
-        self.snapshot.id = if self.snapshot.deltas.is_empty() { None } else { Some(new_id("snap")) };
-        self.ledger.event(trial_id, EventKind::RevertedLater, None)?;
         self.baseline = None;
+        if let Err(e) = self.ledger.mark_unkept(trial_id) {
+            self.backend.apply(&d)?;
+            return Err(e);
+        }
+        self.snapshot.deltas.pop();
+        self.snapshot.trials.pop();
+        self.snapshot.id = self.snapshot.parents.pop().flatten();
         Ok(self.snapshot.clone())
+    }
+
+    /// Run a logged trial's delta again on the current model state, as a new sibling row.
+    pub fn retest(&mut self, trial_id: &str) -> Result<TrialRecord> {
+        let rec = self.ledger.trial(trial_id)?.with_context(|| format!("no trial {trial_id}"))?;
+        let mut delta = self.ledger.load_delta(trial_id)?;
+        delta.id = new_id("d");
+        if let Some(o) = &delta.origin {
+            self.probe_index(&o.probe_id)?;
+        }
+        self.run_trial(Candidate {
+            delta,
+            proposer: rec.proposer,
+            rationale: Some(format!("retest of {trial_id}")),
+            decision_id: rec.decision_id,
+            prediction: None,
+        })
     }
 
     /// Heuristic proposer: at every near-tie step of every probe, try promoting the runner-up, and
@@ -354,10 +405,9 @@ impl Workbench {
                 if out.len() >= opts.budget {
                     break 'sites;
                 }
-                let delta = match self.propose_nudge(&probe_id, step, target, opts.margin) {
-                    Ok(d) => d,
-                    Err(_) => continue,
-                };
+                let delta = self
+                    .propose_nudge(&probe_id, step, target, opts.margin)
+                    .with_context(|| format!("proposing {probe_id}[{step}] -> token {target}"))?;
                 let rec = self.run_trial(Candidate {
                     delta,
                     proposer: "heuristic:near_tie".into(),
