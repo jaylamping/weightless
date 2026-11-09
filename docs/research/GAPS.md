@@ -51,3 +51,11 @@ Ranked by how much each could change a decision.
 - **Landscape and prior art:** add to track 3.
 - **Windows/CUDA benchmark on Joey-PC:** add to track 1.
 - **A/A noise floor and a thinking-on run:** add to the track 6 scoreboard.
+
+## 4. Joey's decisions (9 Nov 2026)
+
+1. **Licensing:** respect licenses where practical. It isn't a blocker, so there's no track 0 gate.
+2. **Safety stance:** none for now. It's a personal project with a single user.
+3. **Competitors:** not needed as market research (personal, non-commercial). Prior art is still worth mining for techniques in track 3.
+4. **Platforms:** proper testing on both **Mac and Windows** (Joey-PC) is required. A Windows/CUDA benchmark is added to track 1.
+5. **A/A noise floor and thinking-on runs:** added to the track 6 scoreboard.
