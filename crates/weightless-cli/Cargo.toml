@@ -1,0 +1,21 @@
+[package]
+name = "weightless-cli"
+description = "Headless Weightless: trace, explore and export the ledger without the desktop app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "weightless"
+path = "src/main.rs"
+
+[features]
+metal = ["weightless-candle/metal"]
+cuda = ["weightless-candle/cuda"]
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+weightless-core.workspace = true
+weightless-candle.workspace = true
