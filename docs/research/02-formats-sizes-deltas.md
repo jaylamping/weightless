@@ -8,7 +8,7 @@
 |---|---|---|
 | **safetensors** (HF) | 8-byte header length, a JSON header (name → dtype, shape, offsets), then one packed little-endian buffer. Supports lazy and partial loading by tensor name, mmap on CPU, BF16 and FP8, and a `__metadata__` string map. 100 MB header limit. ([repo](https://github.com/huggingface/safetensors)) | **The native editing format.** Weights are stored at full precision, a single tensor can be read without loading the rest, and an edited tensor can be written back to just its shard. Our `Backend::read_tensor` maps straight onto it. |
 | **MLX quantized** (safetensors container) | Affine quantization per group (typically 64 elements): packed ints plus a per-group `scales` and `biases` tensor | Editing a quantized tensor means dequantizing, adding the delta, and requantizing the touched groups. That's lossy (see §3). mlx-lm usually keeps sensitive tensors at higher bits (this varies by recipe; check each model's `quantization` config). |
-| **GGUF** (llama.cpp) | "GGUF" magic, version 3, then KV metadata, tensor descriptors (name, dims, ggml type, offset) and data aligned to 32 bytes. Types: F32/F16/BF16, legacy Q4_0–Q8_0, K-quants Q2_K–Q8_K, I-quants, TQ and MXFP4. ([llama.cpp docs](https://www.mintlify.com/ggml-org/llama.cpp/concepts/gguf-format)) | Block-quantized, so the same dequantize/requantize issue applies. Tensor names differ from HF (`output.weight`, `token_embd.weight`), so we need a name map. llama.cpp's LoRA converter rejects embedding adapters, and its source says it ignores `lm_head` ones (track 1). That means a GGUF export of Joey-style edits must **patch `output.weight` directly**, not ship as a LoRA. |
+| **GGUF** (llama.cpp) | "GGUF" magic, version 3, then KV metadata, tensor descriptors (name, dims, ggml type, offset) and data aligned to 32 bytes. Types: F32/F16/BF16, legacy Q4_0–Q8_0, K-quants Q2_K–Q8_K, I-quants, TQ and MXFP4. ([llama.cpp docs](https://www.mintlify.com/ggml-org/llama.cpp/concepts/gguf-format)) | Block-quantized, so the same dequantize/requantize issue applies. Tensor names differ from HF (`output.weight`, `token_embd.weight`), so we need a name map. llama.cpp's LoRA converter rejects embedding adapters, and its source appears to ignore `lm_head` ones (seen in source, unconfirmed; see GAPS.md). So a GGUF export of Joey-style edits likely must **patch `output.weight` directly**, not ship as a LoRA. |
 | **Others** (GPTQ/AWQ/EXL3, FP8 checkpoints, UQFF for mistral.rs) | Mostly kernel-specific quantized layouts | Read-only sources at best. Support comes later, through "dequantize the tensors we touch". |
 
 **Rule:** we edit at full precision. If the base model is quantized, the tensors we touch get a **full-precision overlay**; the rest stays quantized.
@@ -28,7 +28,7 @@ Weights only, at 2 bytes/param for bf16 and about 0.56 bytes/param at roughly 4.
 
 | Hardware | Fits in bf16 | Fits with a quantized base + overlay |
 |---|---|---|
-| 16 GB GPU (**Joey-PC: RTX 5080**, ~10 GB already used by desktop apps) | 9B bf16 does **not** fit; needs CPU offload or a quantized base | ≤ ~20B |
+| 16 GB GPU (**Joey-PC: RTX 5080**, ~10 GB already used by desktop apps) | 9B bf16 does **not** fit; needs CPU offload or a quantized base | ~6 GB free: ≤ ~9B quantized, and tight once KV is added (see track 11). With those apps closed: ≤ ~20B |
 | 24 GB GPU (e.g. 4090) | ≤ ~9B (tight) | ≤ ~35B |
 | 32 GB GPU (e.g. 5090) | ~9–12B | ≤ ~50B |
 | 128 GB Mac (Joey's) | ≤ ~50B dense, 35B-A3B | ≤ ~180B dense (slow) |
@@ -74,7 +74,7 @@ A **snapshot** is `base + ordered [Delta]`, which is a few KB to MB instead of a
 
 ## 5. Open items
 
-- Verify each engine accepts a LoRA on `lm_head` (mistral.rs, mlx-lm, vLLM). llama.cpp's converter is known not to.
+- Verify each engine accepts a LoRA on `lm_head` (mistral.rs, mlx-lm, vLLM, llama.cpp). llama.cpp's converter appears not to (unconfirmed).
 - Check why Joey's kept snapshots are 2 GB larger than the original (dtype or sharding on save).
 - Measure: does merging edit-brief into bf16 reproduce the live overlay's outputs on all probes and controls?
 - Tied-embedding models: an edit to `lm_head` is also an input-embedding edit. Decide whether to untie on load.

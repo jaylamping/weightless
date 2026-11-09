@@ -67,6 +67,9 @@ def main():
         D = lm1 - lm0; rows = np.nonzero(np.abs(D).sum(1))[0]
         report["edit_brief_delta"] = dict(changed_rows=rows.tolist()[:20], n_changed_rows=int(len(rows)), max_abs=float(np.abs(D).max()))
         np.savez(OUT / "edit_brief_delta.npz", rows=rows, delta_rows=D[rows])
+    else:
+        report["edit_brief_delta"] = "unavailable: model has no language_model.lm_head"
+        print("WARNING: lm_head delta not measured", flush=True)
     (OUT / "mlx_report.json").write_text(json.dumps(report, indent=2))
     print("DONE", json.dumps({k: v for k, v in report.items() if k not in ("original", "edit_brief")}), flush=True)
 
