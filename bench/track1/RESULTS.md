@@ -25,6 +25,7 @@ Probes are the five-probe character total. Controls are characters for 8 times 7
 | edit-gcd | 833 | **833** · 20 / 189 | 829 · 100 / 189 | **833** · 100 / 189 |
 | edit-template | 727 · square 189 | **727** · 20 / 189 | 727 · 100 / 189 | **727** · 100 / 189 |
 
+- **Precision caveat (checked after the run):** the edited snapshots store `lm_head.weight` as **F32** (4.07 GB), the original as BF16; every other tensor is unchanged. mlx ran the edited snapshots with an F32 `lm_head`, while mistral.rs `--dtype bf16` cast it to bf16. So on the edited rows, mlx vs mistral.rs differences mix precision with engine behaviour. The original-weights row is like for like (and its controls already differ, 155 vs 128). The edited snapshots' `model.safetensors.index.json` `total_size` is also a stale copy of the original's.
 - **The probes reproduce on every engine and snapshot** (mlx stream and mistral.rs).
 - **The controls don't.** On the original weights, 8 times 7 is 155 chars on mlx and 128 on mistral.rs. After edit-brief, the square drops to 189 on mlx (matching the session) but stays 239 on mistral.rs until edit-gcd. And 8 times 7 drops to 20 chars on mlx stream after edit-brief but 100–102 elsewhere (whether those 20 chars still contain 56 was not captured).
 - So the controls, which are exactly the prompts that sit near an edit's hidden state, are where engines and decode paths disagree.
