@@ -25,3 +25,4 @@ See [GAPS.md](GAPS.md): joe-review fixes, plus what this research track didn't c
 | 8 | Built-in navigator model (base model, ledger schema, training) | not started |
 | 9 | Desktop architecture (Tauri v2, in-process vs sidecar, IPC, packaging) | not started |
 | 10 | Visualization, someday (wgpu vs WebGPU, LOD tensor rendering) | not started |
+| 11 | Fast inference with weights in system RAM (Strata, NInfer, MoE expert offload, memory planner) | [report](11-ram-offload-inference.md) |
