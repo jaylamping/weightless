@@ -77,7 +77,7 @@ Six reviewers plus a judge. Fixed in the PRs: stale control numbers in RESULTS, 
 
 Still open:
 - Re-run the edited-snapshot mlx vs mistral.rs comparison at matched `lm_head` precision.
-- Serve-mode re-gating needs logprobs from each serving engine; Strata's support is unchecked.
+- Serve mode: engines without logprobs get generation-only checks and edits marked "not margin-checked" (Joey, 9 Nov). Whether Strata returns logprobs is unchecked.
 - Measure the Joey-PC budget (Q4 or NVFP4 body + bf16 `lm_head`) before relying on "fits".
 - A/A noise floor in gate mode (06-testing-ab.md still lists only mlx batch/stream and mistral.rs).
 - Where Qwen3.5's Gated DeltaNet recurrent state lives, and at what precision, under gate mode.

@@ -151,7 +151,7 @@ pub struct Capabilities {
     pub gpu_expert_cache: bool, // adaptive GPU cache for experts that live in RAM
     pub elastic_vram: bool,     // set_vram_reserve works without unloading
     pub deterministic_gate_mode: bool, // begin_gate can freeze placement, kernels and drafting
-    pub top_logprobs: bool,     // can return top-k logprobs per step (minimum for re-gating an exported artifact)
+    pub top_logprobs: bool,     // can return top-k logprobs per step (needed for a full margin re-gate; without it, generation-only checks)
 }
 
 /// One request. Deltas are activated per request, so concurrent workers can each carry different edits
