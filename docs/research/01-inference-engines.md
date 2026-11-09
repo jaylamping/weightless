@@ -167,7 +167,14 @@ pub trait Backend {
     fn revert(&mut self, h: DeltaHandle) -> Result<()>;
     fn score_trials(&self, base: TraceRequest, trials: &[Delta]) -> Result<Vec<TrialScore>>;
     fn export(&self, deltas: &[DeltaHandle], fmt: ExportFormat) -> Result<PathBuf>;
+    // Added from track 11 (RAM offload):
+    fn plan(&self, model: &ModelRef, budget: MemoryBudget) -> Result<PlacementPlan>; // per-tensor device, dtype, pinned/edited; run before load
+    fn set_vram_reserve(&mut self, mib: u64) -> Result<()>;  // elastic VRAM: give memory back to other apps without unloading
 }
+// MemoryBudget = free VRAM and RAM read at start, minus reserves for other apps and the OS.
+// PlacementPlan marks edited tensors as GPU-resident and full precision; edits stay compute-time overlays,
+// never written into cached or quantized copies. DecodeSpec gains `gate_mode` (fixed placement, no adaptive
+// cache swaps, fixed kernel path, no drafting, deployment KV dtype) for every keep/reject decision.
 ```
 
 Everything above this trait (gates, keep rule, ledger, lineage, the agent API) is backend-agnostic. A **parity harness** runs the same probes and the same delta on every backend, and records logit and top-1 agreement in the ledger, so rows from different backends stay comparable.
@@ -184,6 +191,10 @@ Everything above this trait (gates, keep rule, ledger, lineage, the agent API) i
 | per_request_deltas | we build | ✓ | per context | we build | we build |
 | batched_trials | we build | partial | – | we build | we build |
 | Qwen3.5 | open PRs | ✓ | ✓ | port from mlx-lm | – |
+| offload_layers (track 11) | we build | ✓ whole layers to CPU | ✓ `-ngl` | unified memory | – |
+| offload_experts + gpu_expert_cache | we build | not found | ✓ `-ot exps=CPU`, `--moe-cache-mib` | unified memory | – |
+| elastic_vram | we build | – | – | n/a | – |
+| gate_mode (deterministic) | we build | check | check | check | check |
 
 ## Wave order (proposed)
 
@@ -207,3 +218,4 @@ candle and MLX are the **baseline**. Our own engine is developed alongside them,
 - edit fidelity (does the reference delta reproduce the recorded completion lengths?)
 - trials/s for batched candidate edits
 - peak memory
+- the same metrics on Joey-PC under a memory budget (quantized body + full-precision edited tensors, or MoE expert offload), in gate mode and fast mode (track 11)

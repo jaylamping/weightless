@@ -59,3 +59,13 @@ Ranked by how much each could change a decision.
 3. **Competitors:** not needed as market research (personal, non-commercial). Prior art is still worth mining for techniques in track 3.
 4. **Platforms:** proper testing on both **Mac and Windows** (Joey-PC) is required. A Windows/CUDA benchmark is added to track 1.
 5. **A/A noise floor and thinking-on runs:** added to the track 6 scoreboard.
+
+## 5. Track 11 follow-ups (9 Nov 2026)
+
+Joey asked for all of [track 11](11-ram-offload-inference.md)'s recommendations to go into the plan. They're listed in the [research index](README.md#plan-changes-adopted-from-track-11-joey-9-nov-2026). Still open:
+
+- Does mistral.rs's topology file allow per-tensor CPU placement, such as experts only? Read the source.
+- Does the Qwen3.5/3.8 MTP head share `lm_head`? It decides whether edits carry into speculative drafts.
+- Windows/CUDA run on Joey-PC under a memory budget: Qwen3.5-9B as Q4 body + bf16 `lm_head`, with SOLIDWORKS open. **Only after Joey clears it.**
+- Check Joey-PC's NVIDIA Sysmem Fallback policy before the next GPU run.
+
