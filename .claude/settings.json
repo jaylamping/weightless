@@ -1,0 +1,19 @@
+{
+  "includeCoAuthoredBy": false,
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && git config user.name 'Joey Lamping' && git config user.email '35737718+jaylamping@users.noreply.github.com' && python3 scripts/check_attribution.py install"
+          }
+        ]
+      }
+    ]
+  }
+}

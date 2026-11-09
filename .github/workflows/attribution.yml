@@ -1,0 +1,40 @@
+# No AI attribution in commits or PR descriptions. Its own workflow so that editing a PR
+# description reruns only this check.
+name: attribution
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  attribution:
+    name: no AI attribution
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: PR description
+        if: github.event_name == 'pull_request'
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n' "$BODY" | python3 scripts/check_attribution.py text
+      - name: Commits in the PR
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/check_attribution.py range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+      - name: Commits in the push
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          # A new branch has no "before"; check what it adds over main.
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            python3 scripts/check_attribution.py range "origin/main..$AFTER"
+          else
+            python3 scripts/check_attribution.py range "$BEFORE..$AFTER"
+          fi
