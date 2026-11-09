@@ -16,7 +16,7 @@ Background:
 | 3 | Weight-editing methods (ROME/MEMIT, rank-1, steering, model diffing, paper code) | not started |
 | 4 | Interpretability for the "see everything" view (logit lens, SAEs, attribution) | not started |
 | 5 | Concurrent workers on one loaded model (batched trials, multi-LoRA serving) | not started |
-| 6 | Testing and A/B suite: tiered gates, regression sets, paired A/B of snapshots, robustness across backends and decode paths, LLM-judge | not started (expanded 9 Nov per Joey) |
+| 6 | Testing and A/B suite: tiered gates, regression sets, paired A/B of snapshots, robustness across backends and decode paths, LLM-judge | [state-of-the-art report](06-testing-ab.md) |
 | 7 | Agent harness and providers (MCP, subscription OAuth, local models, routers, admission test) | not started |
 | 8 | Built-in navigator model (base model, ledger schema, training) | not started |
 | 9 | Desktop architecture (Tauri v2, in-process vs sidecar, IPC, packaging) | not started |
