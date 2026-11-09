@@ -94,6 +94,15 @@ Saturation matters less than people think. We check for regressions **against ou
 - **Report a length-controlled win rate** next to the raw one ([LC-AlpacaEval 2404.04475](https://arxiv.org/abs/2404.04475)). That matters for us, because edits change verbosity.
 - **Flag same-family judges** for self-preference ([2404.13076](https://arxiv.org/abs/2404.13076)). Calibrate against a small human-labelled set using prediction-powered inference ([2403.07008](https://arxiv.org/abs/2403.07008)).
 
+### Decision models as a first-pass judge (added 9 Nov 2026)
+
+"Decision models" return typed answers with probabilities (pick an option, a score, a yes/no probability) and no text, so they are much cheaper and faster than a generative judge.
+
+- **Jev** (TypeSafe, Oct 2026) is API-only and proprietary: about $0.04 per million input tokens, output free, 262K context ([OpenRouter explainer](https://openrouter.ai/blog/insights/what-is-jev/)). *JEV-as-a-Judge* ([2609.26550](https://arxiv.org/abs/2609.26550)) reports it within ~3 points of a frontier judge on pairwise items whose verdict can be read off the text, at 0.36% of the cost and a 0.15 s median latency. It falls behind where the verdict has to be worked out (math, code, logic), and its confidence is less reliable on style-adversarial pairs and reference-free prose. A cascade that accepts confident Jev verdicts and escalates the rest to a reasoning judge matched the frontier judge at 41% of its cost.
+- **Open-weight options** exist, such as Laya (~421M, ModernBERT, runs on CPU) and DiffusionGemma (~2.6B). In Red Hat's guardrail benchmark ([Oct 2026](https://developers.redhat.com/articles/2026/10/02/benchmarking-ai-decision-models-against-traditional-guardrails)) they were not clearly faster, cheaper or better than an LLM judge or a fine-tuned classifier on those tasks.
+
+**How we use them:** only in the judged slice (open-ended quality and style comparisons in the medium and full tiers). Most of the gate is logit math and exact checks, which are cheaper than any model and need no judge. Run the judge as a cascade: decision model first, escalate low-confidence items (and every math, code or logic item) to the reasoning judge. Fix the confidence threshold on a held-out set from our own ledger before trusting it, and keep both-orders and length-controlled reporting. Concision edits are a style change, which is exactly where Jev's confidence was weakest, so measure that slice separately. Jev is API-only, so it can't run offline or be fine-tuned. A local decision model trained on our ledger (the navigator's scorer, track 8) is the long-term version.
+
 ### Ranking thousands of candidate edits
 
 - Use Bradley–Terry with bootstrap CIs, not online Elo ([LMArena](https://news.lmarena.ai/extended-arena)). Judge-aware BT is an option ([2601.21817](https://arxiv.org/abs/2601.21817)).
