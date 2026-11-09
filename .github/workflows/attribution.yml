@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   attribution:
@@ -20,9 +21,12 @@ jobs:
           fetch-depth: 0
       - name: PR description
         if: github.event_name == 'pull_request'
+        # Read the live description, not the event's copy, so re-running a failed check after the
+        # description is fixed passes instead of re-checking the old text.
         env:
-          BODY: ${{ github.event.pull_request.body }}
-        run: printf '%s\n' "$BODY" | python3 scripts/check_attribution.py text
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh api "repos/${{ github.repository }}/pulls/$PR" --jq '.body // ""' | python3 scripts/check_attribution.py text
       - name: Commits in the PR
         if: github.event_name == 'pull_request'
         run: python3 scripts/check_attribution.py range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
